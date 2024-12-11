@@ -48,7 +48,8 @@ def crcbqcpsopsd(inParams, psoParams, nRuns):
         'bestRun': None,
         'bestFitness': None,
         'bestSig': np.zeros(nSamples),
-        'bestQcCoefs': np.zeros(1),
+        'bestQcCoefs': np.zeros(3),
+        'bestSNR': None,
     }
 
     # 创建总进度条
@@ -66,9 +67,10 @@ def crcbqcpsopsd(inParams, psoParams, nRuns):
     for lpruns in range(nRuns):
         allRunsOutput = {
             'fitVal': 0,
-            'qcCoefs': np.zeros(1),
+            'qcCoefs': np.zeros(3),
             'estSig': np.zeros(nSamples),
             'totalFuncEvals': [],
+            'snr': 0,
         }
         fitVal[lpruns] = outStruct[lpruns]['bestFitness']
         allRunsOutput['fitVal'] = fitVal[lpruns]
@@ -76,12 +78,10 @@ def crcbqcpsopsd(inParams, psoParams, nRuns):
         fHandle = lambda x, returnxVec: glrtqcsig4pso_wrapper(x, inParams, returnxVec)
         _, qcCoefs = fHandle(outStruct[lpruns]['bestLocation'][np.newaxis, ...], returnxVec=1)
         allRunsOutput['qcCoefs'] = qcCoefs[0]
-        # 这个位置没改完
-        """没改完！！！！！"""
-        snr = claculateSNR(inParams,inParams['dataY'],outStruct[lpruns]['bestSig'])
-
-        estSig = crcbgenqcsig(inParams['dataX'], snr, qcCoefs[0])
-        estSig, _ = normsig4psd(estSig, inParams['sampFreq'], inParams['psdPosFreq'], 1)
+        estSig = crcbgenqcsig(inParams['dataX'], inParams['A'], qcCoefs[0])
+        snr = claculateSNR(inParams,inParams['dataY'],estSig,inParams['sampFreq'],inParams['psdPosFreq']) # changed by ywq
+        print("算法过程中snr:",snr)
+        estSig, _ = normsig4psd(estSig, inParams['sampFreq'], inParams['psdPosFreq'], snr)
         estAmp = innerprodpsd(inParams['dataY'], estSig, inParams['sampFreq'], inParams['psdPosFreq'])
         estSig = estAmp * estSig
 
@@ -95,6 +95,7 @@ def crcbqcpsopsd(inParams, psoParams, nRuns):
     outResults['bestFitness'] = outResults['allRunsOutput'][bestRun]['fitVal']
     outResults['bestSig'] = outResults['allRunsOutput'][bestRun]['estSig']
     outResults['bestQcCoefs'] = outResults['allRunsOutput'][bestRun]['qcCoefs']
+    outResults['bestSNR'] = outResults['allRunsOutput'][bestRun]['snr']
 
     return outResults, outStruct
 
@@ -355,11 +356,18 @@ def innerprodpsd(xVec,yVec,sampFreq,psdVals):
     innProd = np.sum((1/dataLen) * (fftX / psdVec4Norm)*fftY.conj())
     innProd = np.real(innProd)
     return innProd
-# calculate SNR(changed by ywq)
+# calculate SNR(changed by ywq) 
+# if don't unified the length, it will wrong.but if unified,it will wrong too.
 def claculateSNR(inparams,dataY,sigVec,sampFreq,psdVals):
-    llrNoise = innerprodpsd(inparams['noise'][0],sigVec,sampFreq,psdVals)
+    # unified the length 
+    len_min = min(len(dataY), len(sigVec), len(inparams['noise']))
+    inparams['noise'] = inparams['noise'][:len_min]
+    sigVec = sigVec[:len_min]
+    dataY = dataY[:len_min]
+    llrNoise = innerprodpsd(inparams['noise'],sigVec,sampFreq,psdVals)
     llrData = innerprodpsd(dataY,sigVec,sampFreq,psdVals)
     estSNR = (np.mean(llrData) - np.mean(llrNoise)) / np.std(llrNoise)
+    print(estSNR)
     return estSNR
 
 def s2rv(xVec, params):
