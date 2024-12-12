@@ -50,6 +50,7 @@ def crcbqcpsopsd(inParams, psoParams, nRuns):
         'bestSig': np.zeros(nSamples),
         'bestQcCoefs': np.zeros(3),
         'bestSNR': None,
+        # 'bestAmp':None,
     }
 
     # 创建总进度条
@@ -70,7 +71,7 @@ def crcbqcpsopsd(inParams, psoParams, nRuns):
             'qcCoefs': np.zeros(3),
             'estSig': np.zeros(nSamples),
             'totalFuncEvals': [],
-            'snr': 0,
+            'snr': [],
         }
         fitVal[lpruns] = outStruct[lpruns]['bestFitness']
         allRunsOutput['fitVal'] = fitVal[lpruns]
@@ -78,25 +79,42 @@ def crcbqcpsopsd(inParams, psoParams, nRuns):
         fHandle = lambda x, returnxVec: glrtqcsig4pso_wrapper(x, inParams, returnxVec)
         _, qcCoefs = fHandle(outStruct[lpruns]['bestLocation'][np.newaxis, ...], returnxVec=1)
         allRunsOutput['qcCoefs'] = qcCoefs[0]
-        estSig = crcbgenqcsig(inParams['dataX'], inParams['A'], qcCoefs[0])
-        snr = claculateSNR(inParams,inParams['dataY'],estSig,inParams['sampFreq'],inParams['psdPosFreq']) # changed by ywq
-        print("算法过程中snr:",snr)
-        estSig, _ = normsig4psd(estSig, inParams['sampFreq'], inParams['psdPosFreq'], snr)
-        estAmp = innerprodpsd(inParams['dataY'], estSig, inParams['sampFreq'], inParams['psdPosFreq'])
-        estSig = estAmp * estSig
 
+        """
+        怎么感觉这个顺序怪怪的？
+        1、生成信号
+        2、将信号标准化
+        3、计算信号的加权内积当作振幅？？？
+        4、将振幅与标准化信号相乘得到输出信号
+        """
+
+        estSig = crcbgenqcsig(inParams['dataX'], inParams['A'], qcCoefs[0])  # changed by ywq
+        # estSig = crcbgenqcsig(inParams['dataX'], 1, qcCoefs[0])
+        snr = calculateSNR(inParams,inParams['dataY'],estSig,inParams['sampFreq'],inParams['psdPosFreq']) # changed by ywq
+        estSig, _ = normsig4psd(estSig, inParams['sampFreq'], inParams['psdPosFreq'], snr) # changed by ywq
+        # estSig, _ = normsig4psd(estSig, inParams['sampFreq'], inParams['psdPosFreq'], 1)
+        estAmp = innerprodpsd(inParams['dataY'], estSig, inParams['sampFreq'], inParams['psdPosFreq']) # question? 加权内积不能获得振幅吧
+        # 因为前面已经用振幅算过了，所以这边就不用振幅了
+        # estSig = estAmp * estSig
+        # estSig = inParams['A'] * estSig     # changed by ywq
+        # print('原方法得到的estAmp:',estAmp)
+        print(f"第{lpruns}次循环SNR结果:",snr)
         allRunsOutput['estSig'] = estSig
         allRunsOutput['totalFuncEvals'] = outStruct[lpruns]['totalFuncEvals']
+        allRunsOutput['snr'] = snr
         outResults['allRunsOutput'].append(allRunsOutput)
 
+
     # 找到最佳运行
+    
     bestRun = np.argmin(fitVal)
     outResults['bestRun'] = bestRun
     outResults['bestFitness'] = outResults['allRunsOutput'][bestRun]['fitVal']
     outResults['bestSig'] = outResults['allRunsOutput'][bestRun]['estSig']
     outResults['bestQcCoefs'] = outResults['allRunsOutput'][bestRun]['qcCoefs']
-    outResults['bestSNR'] = outResults['allRunsOutput'][bestRun]['snr']
-
+    print('传递的snr:',outResults['allRunsOutput'][bestRun]['snr'])
+    outResults['bestSNR'] = outResults['allRunsOutput'][bestRun]['snr']  # changed by ywq
+    print("传递接收到的snr:",outResults['allRunsOutput'][bestRun]['snr'])
     return outResults, outStruct
 
 
@@ -358,16 +376,17 @@ def innerprodpsd(xVec,yVec,sampFreq,psdVals):
     return innProd
 # calculate SNR(changed by ywq) 
 # if don't unified the length, it will wrong.but if unified,it will wrong too.
-def claculateSNR(inparams,dataY,sigVec,sampFreq,psdVals):
+def calculateSNR(inparams,dataY,sigVec,sampFreq,psdVals):
     # unified the length 
     len_min = min(len(dataY), len(sigVec), len(inparams['noise']))
     inparams['noise'] = inparams['noise'][:len_min]
     sigVec = sigVec[:len_min]
     dataY = dataY[:len_min]
-    llrNoise = innerprodpsd(inparams['noise'],sigVec,sampFreq,psdVals)
-    llrData = innerprodpsd(dataY,sigVec,sampFreq,psdVals)
-    estSNR = (np.mean(llrData) - np.mean(llrNoise)) / np.std(llrNoise)
-    print(estSNR)
+    llrNoise = innerprodpsd(inparams['noise'],sigVec,inparams['sampFreq'],inparams['psdPosFreq'])
+    llrData = innerprodpsd(dataY,sigVec,inparams['sampFreq'],inparams['psdPosFreq'])
+    # estSNR = (np.mean(llrData) - np.mean(llrNoise)) / np.std(llrNoise) 
+    estSNR = (llrData - llrNoise) / llrNoise
+    # print('计算函数中的snr:',estSNR)
     return estSNR
 
 def s2rv(xVec, params):
