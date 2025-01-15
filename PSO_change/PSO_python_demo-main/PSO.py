@@ -7,6 +7,11 @@ from tqdm import tqdm
 from concurrent.futures import ProcessPoolExecutor, as_completed
 # from numba import jit
 # from numba import njit, prange
+# 常量定义
+G = 6.67430e-11  # 万有引力常数, m^3 kg^-1 s^-2
+c = 2.998e8  # 光速, m/s
+M_sun = 1.989e30  # 太阳质量, kg
+pc = 3.086e16  # pc到m的转换
 
 __all__ = ['crcbqcpsopsd', 
            'crcbpso', 
@@ -40,7 +45,7 @@ def run_single_pso(lpruns, inParams, nDim, psoParams):
 
 def crcbqcpsopsd(inParams, psoParams, nRuns):
     nSamples = len(inParams['dataX'])
-    nDim = 3
+    nDim = 11
 
     outStruct = [{} for _ in range(nRuns)]
     outResults = {
@@ -48,9 +53,20 @@ def crcbqcpsopsd(inParams, psoParams, nRuns):
         'bestRun': None,
         'bestFitness': None,
         'bestSig': np.zeros(nSamples),
-        'bestQcCoefs': np.zeros(3),
-        'bestSNR': None,
+        # 'bestQcCoefs': np.zeros(3),
+        # 'bestSNR': None,
         # 'bestAmp':None,
+        'r': None,
+        'm1': None,
+        'm2': None,
+        'tc': None,
+        'phi_c': None,
+        'DL': None,
+        'DLS': None,
+        'zl': None,
+        'v': None,
+        'omega': None,
+        'y': None,
     }
 
     # 创建总进度条
@@ -68,53 +84,67 @@ def crcbqcpsopsd(inParams, psoParams, nRuns):
     for lpruns in range(nRuns):
         allRunsOutput = {
             'fitVal': 0,
-            'qcCoefs': np.zeros(3),
+            #'qcCoefs': np.zeros(3),
+            'r':np.zeros(0),
+            'm1':np.zeros(0),
+            'm2':np.zeros(0),
+            'tc':np.zeros(0),
+            'phi_c':np.zeros(0),
+            'DL':np.zeros(0),
+            'DLS':np.zeros(0),
+            'zl':np.zeros(0),
+            'v':np.zeros(0),
+            'omega':np.zeros(0),
+            'y':np.zeros(0),
             'estSig': np.zeros(nSamples),
             'totalFuncEvals': [],
-            'snr': [],
+            #'snr': [],
         }
         fitVal[lpruns] = outStruct[lpruns]['bestFitness']
         allRunsOutput['fitVal'] = fitVal[lpruns]
 
         fHandle = lambda x, returnxVec: glrtqcsig4pso_wrapper(x, inParams, returnxVec)
-        _, qcCoefs = fHandle(outStruct[lpruns]['bestLocation'][np.newaxis, ...], returnxVec=1)
-        allRunsOutput['qcCoefs'] = qcCoefs[0]
-
-        """
-        怎么感觉这个顺序怪怪的？
-        1、生成信号
-        2、将信号标准化
-        3、计算信号的加权内积当作振幅？？？
-        4、将振幅与标准化信号相乘得到输出信号
-        """
-
-        estSig = crcbgenqcsig(inParams['dataX'], inParams['A'], qcCoefs[0])  # changed by ywq
+        _,r,m1,m2,tc,phi_c,DL,DLS,zl,v,omega,y = fHandle(outStruct[lpruns]['bestLocation'][np.newaxis, ...], returnxVec=1)
+        # allRunsOutput['qcCoefs'] = qcCoefs[0]
+        allRunsOutput['r'] = r * 1e8 * pc
+        allRunsOutput['m1'] = m1 * M_sun
+        allRunsOutput['m2'] = m2 * M_sun
+        allRunsOutput['tc'] = tc
+        allRunsOutput['phi_c'] = phi_c
+        allRunsOutput['DL'] = DL * 1e6 * pc
+        allRunsOutput['DLS'] = DLS * 1e6 * pc
+        allRunsOutput['zl'] = zl
+        allRunsOutput['v'] = v * 1e6
+        allRunsOutput['omega'] = omega
+        allRunsOutput['y'] = y
+        estSig = crcbgenqcsig(inParams['dataX'], r,m1,m2,tc,phi_c,DL,DLS,zl,v,omega,y)  # changed by ywq
         # estSig = crcbgenqcsig(inParams['dataX'], 1, qcCoefs[0])
-        snr = calculateSNR(inParams,inParams['dataY'],estSig,inParams['sampFreq'],inParams['psdPosFreq']) # changed by ywq
-        estSig, _ = normsig4psd(estSig, inParams['sampFreq'], inParams['psdPosFreq'], snr) # changed by ywq
+        estSig, _ = normsig4psd(estSig, inParams['sampFreq'], inParams['psdPosFreq'], 1) # changed by ywq
         # estSig, _ = normsig4psd(estSig, inParams['sampFreq'], inParams['psdPosFreq'], 1)
         estAmp = innerprodpsd(inParams['dataY'], estSig, inParams['sampFreq'], inParams['psdPosFreq']) # question? 加权内积不能获得振幅吧
-        # 因为前面已经用振幅算过了，所以这边就不用振幅了
-        # estSig = estAmp * estSig
-        # estSig = inParams['A'] * estSig     # changed by ywq
-        # print('原方法得到的estAmp:',estAmp)
-        print(f"第{lpruns}次循环SNR结果:",snr)
         allRunsOutput['estSig'] = estSig
         allRunsOutput['totalFuncEvals'] = outStruct[lpruns]['totalFuncEvals']
-        allRunsOutput['snr'] = snr
         outResults['allRunsOutput'].append(allRunsOutput)
 
-
+        
     # 找到最佳运行
-    
     bestRun = np.argmin(fitVal)
     outResults['bestRun'] = bestRun
     outResults['bestFitness'] = outResults['allRunsOutput'][bestRun]['fitVal']
     outResults['bestSig'] = outResults['allRunsOutput'][bestRun]['estSig']
-    outResults['bestQcCoefs'] = outResults['allRunsOutput'][bestRun]['qcCoefs']
-    print('传递的snr:',outResults['allRunsOutput'][bestRun]['snr'])
-    outResults['bestSNR'] = outResults['allRunsOutput'][bestRun]['snr']  # changed by ywq
-    print("传递接收到的snr:",outResults['allRunsOutput'][bestRun]['snr'])
+
+    # 存储最佳运行的所有参数
+    outResults['r'] = outResults['allRunsOutput'][bestRun]['r']
+    outResults['m1'] = outResults['allRunsOutput'][bestRun]['m1']
+    outResults['m2'] = outResults['allRunsOutput'][bestRun]['m2']
+    outResults['tc'] = outResults['allRunsOutput'][bestRun]['tc']
+    outResults['phi_c'] = outResults['allRunsOutput'][bestRun]['phi_c']
+    outResults['DL'] = outResults['allRunsOutput'][bestRun]['DL']
+    outResults['DLS'] = outResults['allRunsOutput'][bestRun]['DLS']
+    outResults['zl'] = outResults['allRunsOutput'][bestRun]['zl']
+    outResults['v'] = outResults['allRunsOutput'][bestRun]['v']
+    outResults['omega'] = outResults['allRunsOutput'][bestRun]['omega']
+    outResults['y'] = outResults['allRunsOutput'][bestRun]['y']
     return outResults, outStruct
 
 
@@ -291,10 +321,19 @@ def crcbpso(fitfuncHandle, nDim, O=0, **varargin):
     returnData['bestFitness'] = gbestVal
     return returnData
 
-def crcbgenqcsig(dataX, snr, qcCoefs):
-    phaseVec = qcCoefs[0]*dataX + qcCoefs[1]*dataX**2 + qcCoefs[2]*dataX**3
-    sigVec = np.sin(2*np.pi*phaseVec)
-    sigVec = snr*sigVec/np.linalg.norm(sigVec)
+def crcbgenqcsig(dataX,r,m1,m2,tc,phi_c,DL,DLS,zl,v,omega,y):
+    # phaseVec = qcCoefs[0]*dataX + qcCoefs[1]*dataX**2 + qcCoefs[2]*dataX**3
+    # sigVec = np.sin(2*np.pi*phaseVec)
+    # sigVec = snr*sigVec/np.linalg.norm(sigVec)
+    Ds = DL + DLS
+    Mlz = 4 * np.pi **2 *v ** 4 *(1 + zl) * DL * DLS / Ds
+    w = 4 * Mlz * omega
+    Vm = (m1 * m2)/ (m1 + m2) ** 2
+    M_c = Vm ** (3/5) * (m1 + m2)
+    F_geo = np.sqrt(1 + 1/y) - 1j * np.sqrt(-1 + 1 / y) * np.exp(1j * w * 2 * y)
+    theta_t = c ** 3 * (tc - dataX) / (5 * G * M_c)
+    sigVec = G * M_c / (c ** 2 * r) * theta_t ** (-1/4) *np.cos(2 * phi_c - 2 * theta_t ** (5/8)) * F_geo
+    sigVec = 1 * sigVec / np.linalg.norm(sigVec)
     return sigVec
 
 
@@ -328,13 +367,35 @@ def glrtqcsig4pso(xVec, params, returnxVec=0):
         return fitVal
 
 # Sum of squared residuals after maximizing over amplitude parameter
-def ssrqc(x, params):
-    phaseVec = x[0]*params['dataX'] + x[1]*params['dataXSq'] + x[2]*params['dataXCb']
-    qc = np.sin(2 * np.pi * phaseVec)
-    qc, _ = normsig4psd(qc, params['sampFreq'], params['psdPosFreq'], 1)
-    #We do not need the normalization factor, just the need template vector
+# def ssrqc(x, params):
+#     phaseVec = x[0]*params['dataX'] + x[1]*params['dataXSq'] + x[2]*params['dataXCb']
+#     qc = np.sin(2 * np.pi * phaseVec)
+#     qc, _ = normsig4psd(qc, params['sampFreq'], params['psdPosFreq'], 1)
+#     #We do not need the normalization factor, just the need template vector
 
-    #Compute fitness (Calculate inner product of data with template qc）
+#     #Compute fitness (Calculate inner product of data with template qc）
+#     inPrd = innerprodpsd(params['dataY'], qc, params['sampFreq'], params['psdPosFreq'])
+#     ssrVal = -(inPrd)**2
+#     return ssrVal
+def ssrqc(x, params):
+    # Generate signal using crcbgenqcsig instead of phase model
+    # x contains the parameters [r, m1, m2, tc, phi_c, DL, DLS, zl, v, omega, y]
+    qc = crcbgenqcsig(params['dataX'], 
+                      x[0],  # r
+                      x[1],  # m1 
+                      x[2],  # m2
+                      x[3],  # tc
+                      x[4],  # phi_c 
+                      x[5],  # DL
+                      x[6],  # DLS 
+                      x[7],  # zl
+                      x[8],  # v
+                      x[9],  # omega
+                      x[10]) # y
+    # Normalize signal using PSD
+    qc, _ = normsig4psd(qc, params['sampFreq'], params['psdPosFreq'], 1)
+
+    # Compute fitness using inner product
     inPrd = innerprodpsd(params['dataY'], qc, params['sampFreq'], params['psdPosFreq'])
     ssrVal = -(inPrd)**2
     return ssrVal
@@ -376,18 +437,7 @@ def innerprodpsd(xVec,yVec,sampFreq,psdVals):
     return innProd
 # calculate SNR(changed by ywq) 
 # if don't unified the length, it will wrong.but if unified,it will wrong too.
-def calculateSNR(inparams,dataY,sigVec,sampFreq,psdVals):
-    # unified the length 
-    len_min = min(len(dataY), len(sigVec), len(inparams['noise']))
-    inparams['noise'] = inparams['noise'][:len_min]
-    sigVec = sigVec[:len_min]
-    dataY = dataY[:len_min]
-    llrNoise = innerprodpsd(inparams['noise'],sigVec,inparams['sampFreq'],inparams['psdPosFreq'])
-    llrData = innerprodpsd(dataY,sigVec,inparams['sampFreq'],inparams['psdPosFreq'])
-    # estSNR = (np.mean(llrData) - np.mean(llrNoise)) / np.std(llrNoise) 
-    estSNR = (llrData - llrNoise) / llrNoise
-    # print('计算函数中的snr:',estSNR)
-    return estSNR
+
 
 def s2rv(xVec, params):
     return xVec * (np.asarray(params['rmax']) - np.asarray(params['rmin'])) + np.asarray(params['rmin'])
