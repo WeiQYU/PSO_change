@@ -5,6 +5,7 @@ from scipy.fftpack import fft
 
 from tqdm import tqdm
 from concurrent.futures import ProcessPoolExecutor, as_completed
+from scipy.io import savemat
 # from numba import jit
 # from numba import njit, prange
 # 常量定义
@@ -23,29 +24,11 @@ __all__ = ['crcbqcpsopsd',
            's2rv',
            'crcbchkstdsrchrng']
 
-# add the funcutions of Parallel
-# from glrtqcsig4pso to crcbqcpsopsd(changed by ywq)
-def glrtqcsig4pso_wrapper(x, inParams, returnxVec):
-    return glrtqcsig4pso(x, inParams, returnxVec)
-
-
-def run_single_pso(lpruns, inParams, nDim, psoParams):
-    np.random.seed(lpruns)
-    fHandle = lambda x, returnxVec: glrtqcsig4pso_wrapper(x, inParams, returnxVec)
-
-    # 创建一个内层进度条
-    with tqdm(total=psoParams['maxSteps'], desc=f"Run {lpruns + 1}", leave=False, position=lpruns + 1) as run_pbar:
-        def update_pbar(step):
-            run_pbar.update(1)
-
-        # 修改 crcbpso 函数，添加回调以更新进度条
-        result = crcbpso(fHandle, nDim, O=0, **psoParams, update_callback=update_pbar)
-
-    return result
-
 def crcbqcpsopsd(inParams, psoParams, nRuns):
     nSamples = len(inParams['dataX'])
     nDim = 11
+    
+    fHandle = lambda x, returnxVec: glrtqcsig4pso(x, inParams, returnxVec)
 
     outStruct = [{} for _ in range(nRuns)]
     outResults = {
@@ -68,53 +51,64 @@ def crcbqcpsopsd(inParams, psoParams, nRuns):
         'omega': None,
         'y': None,
     }
+    # Allocate storage for outputs: results from all runs are stored
+    outStruct = [outStruct for _ in range(nRuns)]
+    
+    # Independent runs of PSO [TODO: runing in parallel.]
+    for lpruns in range(nRuns):
+        # Reset random number generator for each run
+        np.random.seed(lpruns)
+        outStruct[lpruns] = crcbpso(fHandle,nDim,**psoParams)
+        # Below codes are used for checking qcCoefs for current lprun.
+        #_, qcCoefs = fHandle(outStruct[lpruns]['bestLocation'][np.newaxis,...], returnxVec=1)
+        #print(qcCoefs)
 
-    # 创建总进度条
-    with tqdm(total=nRuns, desc="Overall Progress", position=0) as pbar:
-        with ProcessPoolExecutor(max_workers=4) as executor:
-            futures = {executor.submit(run_single_pso, lpruns, inParams, nDim, psoParams): lpruns for lpruns in range(nRuns)}
-
-            for future in as_completed(futures):
-                lpruns = futures[future]
-                outStruct[lpruns] = future.result()
-                pbar.update(1)
-
-    # 准备输出
+    #Prepare output
     fitVal = np.zeros(nRuns)
     for lpruns in range(nRuns):
         allRunsOutput = {
             'fitVal': 0,
             #'qcCoefs': np.zeros(3),
-            'r':np.zeros(0),
-            'm1':np.zeros(0),
-            'm2':np.zeros(0),
-            'tc':np.zeros(0),
-            'phi_c':np.zeros(0),
-            'DL':np.zeros(0),
-            'DLS':np.zeros(0),
-            'zl':np.zeros(0),
-            'v':np.zeros(0),
-            'omega':np.zeros(0),
-            'y':np.zeros(0),
-            'estSig': np.zeros(nSamples),
+            'r':0,
+            'm1':0,
+            'm2':0,
+            'tc':0,
+            'phi_c':0,
+            'DL':0,
+            'DLS':0,
+            'zl':0,
+            'v':0,
+            'omega':0,
+            'y':0,
+            'estSig': 0,
             'totalFuncEvals': [],
             #'snr': [],
         }
         fitVal[lpruns] = outStruct[lpruns]['bestFitness']
         allRunsOutput['fitVal'] = fitVal[lpruns]
+        fitness, params = fHandle(outStruct[lpruns]['bestLocation'][np.newaxis, ...], returnxVec=1)
+        r = params[0,0,0]
+        m1 = params[0,0,1]
+        m2 = params[0,0,2]
+        tc = params[0,0,3]
+        phi_c = params[0,0,4]
+        DL = params[0,0,5]
+        DLS = params[0,0,6]
+        zl = params[0,0,7]
+        v = params[0,0,8]
+        omega = params[0,0,9]
+        y = params[0,0,10]
 
-        fHandle = lambda x, returnxVec: glrtqcsig4pso_wrapper(x, inParams, returnxVec)
-        _,r,m1,m2,tc,phi_c,DL,DLS,zl,v,omega,y = fHandle(outStruct[lpruns]['bestLocation'][np.newaxis, ...], returnxVec=1)
         # allRunsOutput['qcCoefs'] = qcCoefs[0]
-        allRunsOutput['r'] = r * 1e8 * pc
-        allRunsOutput['m1'] = m1 * M_sun
-        allRunsOutput['m2'] = m2 * M_sun
+        allRunsOutput['r'] = r
+        allRunsOutput['m1'] = m1
+        allRunsOutput['m2'] = m2
         allRunsOutput['tc'] = tc
         allRunsOutput['phi_c'] = phi_c
-        allRunsOutput['DL'] = DL * 1e6 * pc
-        allRunsOutput['DLS'] = DLS * 1e6 * pc
+        allRunsOutput['DL'] = DL
+        allRunsOutput['DLS'] = DLS
         allRunsOutput['zl'] = zl
-        allRunsOutput['v'] = v * 1e6
+        allRunsOutput['v'] = v
         allRunsOutput['omega'] = omega
         allRunsOutput['y'] = y
         estSig = crcbgenqcsig(inParams['dataX'], r,m1,m2,tc,phi_c,DL,DLS,zl,v,omega,y)  # changed by ywq
@@ -122,6 +116,7 @@ def crcbqcpsopsd(inParams, psoParams, nRuns):
         estSig, _ = normsig4psd(estSig, inParams['sampFreq'], inParams['psdPosFreq'], 1) # changed by ywq
         # estSig, _ = normsig4psd(estSig, inParams['sampFreq'], inParams['psdPosFreq'], 1)
         estAmp = innerprodpsd(inParams['dataY'], estSig, inParams['sampFreq'], inParams['psdPosFreq']) # question? 加权内积不能获得振幅吧
+        estSig = estAmp * estSig
         allRunsOutput['estSig'] = estSig
         allRunsOutput['totalFuncEvals'] = outStruct[lpruns]['totalFuncEvals']
         outResults['allRunsOutput'].append(allRunsOutput)
@@ -146,7 +141,6 @@ def crcbqcpsopsd(inParams, psoParams, nRuns):
     outResults['omega'] = outResults['allRunsOutput'][bestRun]['omega']
     outResults['y'] = outResults['allRunsOutput'][bestRun]['y']
     return outResults, outStruct
-
 
 def crcbpso(fitfuncHandle, nDim, O=0, **varargin):
     psoParams = dict(
@@ -325,6 +319,11 @@ def crcbgenqcsig(dataX,r,m1,m2,tc,phi_c,DL,DLS,zl,v,omega,y):
     # phaseVec = qcCoefs[0]*dataX + qcCoefs[1]*dataX**2 + qcCoefs[2]*dataX**3
     # sigVec = np.sin(2*np.pi*phaseVec)
     # sigVec = snr*sigVec/np.linalg.norm(sigVec)
+    DL = DL * pc * 1e6
+    DLS = DLS * pc * 1e6
+    r = r * 1e8 * pc
+    m1 = m1 * M_sun
+    m2 = m2 * M_sun
     Ds = DL + DLS
     Mlz = 4 * np.pi **2 *v ** 4 *(1 + zl) * DL * DLS / Ds
     w = 4 * Mlz * omega
@@ -333,7 +332,7 @@ def crcbgenqcsig(dataX,r,m1,m2,tc,phi_c,DL,DLS,zl,v,omega,y):
     F_geo = np.sqrt(1 + 1/y) - 1j * np.sqrt(-1 + 1 / y) * np.exp(1j * w * 2 * y)
     theta_t = c ** 3 * (tc - dataX) / (5 * G * M_c)
     sigVec = G * M_c / (c ** 2 * r) * theta_t ** (-1/4) *np.cos(2 * phi_c - 2 * theta_t ** (5/8)) * F_geo
-    sigVec = 1 * sigVec / np.linalg.norm(sigVec)
+    # sigVec = 1 * sigVec / np.linalg.norm(sigVec)
     return sigVec
 
 
@@ -341,7 +340,7 @@ def crcbgenqcsig(dataX,r,m1,m2,tc,phi_c,DL,DLS,zl,v,omega,y):
 def glrtqcsig4pso(xVec, params, returnxVec=0):
     # rows: points
     # columns: coordinates of a point
-    nVecs, _ = xVec.shape
+    nVecs= xVec.shape[0]
 
     # storage for fitness values
     fitVal = np.zeros(nVecs)
@@ -393,7 +392,10 @@ def ssrqc(x, params):
                       x[9],  # omega
                       x[10]) # y
     # Normalize signal using PSD
+
     qc, _ = normsig4psd(qc, params['sampFreq'], params['psdPosFreq'], 1)
+    
+    savemat('all_canshu.txt',{'r':qc[0],'m1':qc[1],'m2':qc[2],'tc':qc[3],'phi_c':qc[4],'DL':qc[5],'DLS':qc[6],'zl':qc[7],'v':qc[8],'omega':qc[9],'y':qc[10]})
 
     # Compute fitness using inner product
     inPrd = innerprodpsd(params['dataY'], qc, params['sampFreq'], params['psdPosFreq'])
