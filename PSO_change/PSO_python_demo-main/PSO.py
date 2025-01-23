@@ -27,7 +27,7 @@ __all__ = ['crcbqcpsopsd',
 def crcbqcpsopsd(inParams, psoParams, nRuns):
     nSamples = len(inParams['dataX'])
     nDim = 11
-    
+    print("开始土法找参数问题！！！！！！！！")
     fHandle = lambda x, returnxVec: glrtqcsig4pso(x, inParams, returnxVec)
 
     outStruct = [{} for _ in range(nRuns)]
@@ -319,19 +319,40 @@ def crcbgenqcsig(dataX,r,m1,m2,tc,phi_c,DL,DLS,zl,v,omega,y):
     # phaseVec = qcCoefs[0]*dataX + qcCoefs[1]*dataX**2 + qcCoefs[2]*dataX**3
     # sigVec = np.sin(2*np.pi*phaseVec)
     # sigVec = snr*sigVec/np.linalg.norm(sigVec)
+    """
+    r √
+    m1, √
+    m2, √
+    tc,  √
+    phi_c, 最后几个数全变成了2.0  √
+    DL,  √
+    DLS,  √
+    zl,  √
+    v,  √
+    omega, 最后几个值全变为2.0 √
+    y   最后几个值全变为2.0 √
+
+
+
+    ok F_geo的问题
+    去除F_geo之后的sigVec数据还有会有nan的情况出现！
+    """
     DL = DL * pc * 1e6
     DLS = DLS * pc * 1e6
     r = r * 1e8 * pc
     m1 = m1 * M_sun
     m2 = m2 * M_sun
     Ds = DL + DLS
+    v = v * 1e6
     Mlz = 4 * np.pi **2 *v ** 4 *(1 + zl) * DL * DLS / Ds
     w = 4 * Mlz * omega
     Vm = (m1 * m2)/ (m1 + m2) ** 2
     M_c = Vm ** (3/5) * (m1 + m2)
     F_geo = np.sqrt(1 + 1/y) - 1j * np.sqrt(-1 + 1 / y) * np.exp(1j * w * 2 * y)
+    print(f"f_geo:{F_geo}")
     theta_t = c ** 3 * (tc - dataX) / (5 * G * M_c)
-    sigVec = G * M_c / (c ** 2 * r) * theta_t ** (-1/4) *np.cos(2 * phi_c - 2 * theta_t ** (5/8)) * F_geo
+    sigVec = G * M_c / (c ** 2 * r) * theta_t ** (-1/4) *np.cos(2 * phi_c - 2 * theta_t ** (5/8)) #* F_geo
+    # print(f"sigvec:{sigVec}")
     # sigVec = 1 * sigVec / np.linalg.norm(sigVec)
     return sigVec
 
@@ -379,6 +400,7 @@ def glrtqcsig4pso(xVec, params, returnxVec=0):
 def ssrqc(x, params):
     # Generate signal using crcbgenqcsig instead of phase model
     # x contains the parameters [r, m1, m2, tc, phi_c, DL, DLS, zl, v, omega, y]
+    # 所有数据均排查完毕，无误
     qc = crcbgenqcsig(params['dataX'], 
                       x[0],  # r
                       x[1],  # m1 
@@ -391,12 +413,10 @@ def ssrqc(x, params):
                       x[8],  # v
                       x[9],  # omega
                       x[10]) # y
+    # print(qc)
+    # print(f"y:{x[10]}")
     # Normalize signal using PSD
-
     qc, _ = normsig4psd(qc, params['sampFreq'], params['psdPosFreq'], 1)
-    
-    savemat('all_canshu.txt',{'r':qc[0],'m1':qc[1],'m2':qc[2],'tc':qc[3],'phi_c':qc[4],'DL':qc[5],'DLS':qc[6],'zl':qc[7],'v':qc[8],'omega':qc[9],'y':qc[10]})
-
     # Compute fitness using inner product
     inPrd = innerprodpsd(params['dataY'], qc, params['sampFreq'], params['psdPosFreq'])
     ssrVal = -(inPrd)**2
