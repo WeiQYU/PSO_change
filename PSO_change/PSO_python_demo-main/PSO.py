@@ -42,7 +42,7 @@ def crcbqcpsopsd(inParams, psoParams, nRuns):
         'm_c': None,
         'tc': None,
         'phi_c': None,
-        'w': np.zeros(nSamples // 2 + 1), # 由于傅里叶变换的对称性，只需要一半的频率，所以只需要nsamples//2+1个单位来表示频率
+        'mlz': None, 
         'y': None,
     }
     # print(f"r:{r}, m_c:{m_c}, tc:{tc}, phi_c:{phi_c}, w:{w}, y:{y}")
@@ -68,7 +68,7 @@ def crcbqcpsopsd(inParams, psoParams, nRuns):
             'm_c':0,
             'tc':0,
             'phi_c':0,
-            'w':np.zeros(),
+            'mlz':0,
             'y':0,
             'estSig': 0,
             'totalFuncEvals': [],
@@ -76,12 +76,12 @@ def crcbqcpsopsd(inParams, psoParams, nRuns):
         }
         fitVal[lpruns] = outStruct[lpruns]['bestFitness']
         allRunsOutput['fitVal'] = fitVal[lpruns]
-        fitness, params = fHandle(outStruct[lpruns]['bestLocation'][np.newaxis, ...], returnxVec=1)
+        _, params = fHandle(outStruct[lpruns]['bestLocation'][np.newaxis, ...], returnxVec=1)
         r = params[0,0]
         m_c = params[0,1]
         tc = params[0,2]
         phi_c = params[0,3]
-        w = params[0,4]
+        mlz = params[0,4]
         y = params[0,5]
         # print(f"r:{r}, m_c:{m_c}, tc:{tc}, phi_c:{phi_c}, w:{w}, y:{y}")
         # allRunsOutput['qcCoefs'] = qcCoefs[0]
@@ -89,9 +89,9 @@ def crcbqcpsopsd(inParams, psoParams, nRuns):
         allRunsOutput['m_c'] = m_c
         allRunsOutput['tc'] = tc
         allRunsOutput['phi_c'] = phi_c
-        allRunsOutput['w'] = w
+        allRunsOutput['mlz'] = mlz
         allRunsOutput['y'] = y
-        estSig = crcbgenqcsig(inParams['dataX'], r,m_c,tc,phi_c,w,y)  # changed by ywq
+        estSig = crcbgenqcsig(inParams['dataX'], r,m_c,tc,phi_c,mlz,y)  # changed by ywq
         # estSig = crcbgenqcsig(inParams['dataX'], 1, qcCoefs[0])
         estSig, _ = normsig4psd(estSig, inParams['sampFreq'], inParams['psdPosFreq'], 1) # changed by ywq
         # estSig, _ = normsig4psd(estSig, inParams['sampFreq'], inParams['psdPosFreq'], 1)
@@ -113,7 +113,7 @@ def crcbqcpsopsd(inParams, psoParams, nRuns):
     outResults['m_c'] = outResults['allRunsOutput'][bestRun]['m_c']
     outResults['tc'] = outResults['allRunsOutput'][bestRun]['tc']
     outResults['phi_c'] = outResults['allRunsOutput'][bestRun]['phi_c']
-    outResults['w'] = outResults['allRunsOutput'][bestRun]['w']
+    outResults['mlz'] = outResults['allRunsOutput'][bestRun]['mlz']
     outResults['y'] = outResults['allRunsOutput'][bestRun]['y']
     return outResults, outStruct
 
@@ -290,15 +290,17 @@ def crcbpso(fitfuncHandle, nDim, O=0, **varargin):
     returnData['bestFitness'] = gbestVal
     return returnData
 
-def crcbgenqcsig(dataX,r,m_c,tc,phi_c,w,y):
+def crcbgenqcsig(dataX,r,m_c,tc,phi_c,mlz,y):
     # phaseVec = qcCoefs[0]*dataX + qcCoefs[1]*dataX**2 + qcCoefs[2]*dataX**3
     # sigVec = np.sin(2*np.pi*phaseVec)
     # sigVec = snr*sigVec/np.linalg.norm(sigVec)
     theta = c ** 3* (tc - dataX) / (5 * G * m_c)
     # 时域上的信号波形
     h = G * m_c / (c ** 2 * r) * theta ** (-1/4) * np.cos(2 * phi_c - 2 * theta ** (5 / 8))
-    h[-1] = h[-2] * 0.999 # 避免出现无穷大
     h_f = np.fft.rfft(h) # 时域到频域
+    freqs = np.fft.rfftfreq(len(h),dataX[1]-dataX[0]) # 频率
+    omega = 2 * np.pi * freqs 
+    w = G *4 * mlz * omega / c ** 3 
     F_geo = np.sqrt(1 + 1/y) - 1j * np.sqrt(-1 + 1/ y) * np.exp(1j * w * 2 * y) # 透镜效应
     sigVec_f = h_f * F_geo # 给信号增加透镜效应（频域）
     sigVec = np.fft.irfft(sigVec_f) # 转换到时域
@@ -357,7 +359,7 @@ def ssrqc(x, params):
                       x[1],  # m_c
                       x[2],  # tc
                       x[3],  # phi_c
-                      x[4],  # w 
+                      x[4],  # mlz
                       x[5],) # y
     # print(qc)
     # Normalize signal using PSD
