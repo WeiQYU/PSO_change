@@ -6,6 +6,8 @@ from scipy.fftpack import fft
 from tqdm import tqdm
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from scipy.io import savemat
+from pycbc.waveform import get_td_waveform
+from pycbc.psd import aLIGOZeroDetHighPower
 # from numba import jit
 # from numba import njit, prange
 # 常量定义
@@ -38,10 +40,10 @@ def crcbqcpsopsd(inParams, psoParams, nRuns):
         # 'bestQcCoefs': np.zeros(3),
         # 'bestSNR': None,
         # 'bestAmp':None,
-        'r': None,
-        'm_c': None,
-        'tc': None,
-        'phi_c': None,
+        'm1': None,
+        'm2': None,
+        'f_lower': None,
+        'sample_rate': None,
         'mlz': None, 
         'y': None,
     }
@@ -64,10 +66,10 @@ def crcbqcpsopsd(inParams, psoParams, nRuns):
         allRunsOutput = {
             'fitVal': 0,
             #'qcCoefs': np.zeros(3),
-            'r':0,
-            'm_c':0,
-            'tc':0,
-            'phi_c':0,
+            'm1':0,
+            'm2':0,
+            'f_lower':0,
+            'sample_rate':0,
             'mlz':0,
             'y':0,
             'estSig': 0,
@@ -77,25 +79,26 @@ def crcbqcpsopsd(inParams, psoParams, nRuns):
         fitVal[lpruns] = outStruct[lpruns]['bestFitness']
         allRunsOutput['fitVal'] = fitVal[lpruns]
         _, params = fHandle(outStruct[lpruns]['bestLocation'][np.newaxis, ...], returnxVec=1)
-        r = params[0,0]
-        m_c = params[0,1]
-        tc = params[0,2]
-        phi_c = params[0,3]
-        mlz = 10 ** params[0,4]
+        m1 = params[0,0]
+        m2 = params[0,1]
+        f_lower = params[0,2]
+        sample_rate = params[0,3]
+        mlz = params[0,4]
         y = params[0,5]
-        # print(f"r:{r}, m_c:{m_c}, tc:{tc}, phi_c:{phi_c}, mlz:{mlz}, y:{y}")
+        # print(f"r:{r}, m_c:{m_c}, tc:{tc}, phi_c:{phi_c}, w:{w}, y:{y}")
         # allRunsOutput['qcCoefs'] = qcCoefs[0]
-        allRunsOutput['r'] = r
-        allRunsOutput['m_c'] = m_c
-        allRunsOutput['tc'] = tc
-        allRunsOutput['phi_c'] = phi_c
+        allRunsOutput['m1'] = m1
+        allRunsOutput['m2'] = m2
+        allRunsOutput['f_lower'] = f_lower
+        allRunsOutput['sample_rate'] = sample_rate
         allRunsOutput['mlz'] = mlz
         allRunsOutput['y'] = y
-        estSig = crcbgenqcsig(inParams['dataX'], r,m_c,tc,phi_c,mlz,y)  # changed by ywq
+        estSig,psd,_ = crcbgenqcsig(m1,m2,f_lower,sample_rate,mlz,y)
         # estSig = crcbgenqcsig(inParams['dataX'], 1, qcCoefs[0])
-        estSig, _ = normsig4psd(estSig, inParams['sampFreq'], inParams['psdPosFreq'], 1) # changed by ywq
+        estSig, _ = normsig4psd(estSig, inParams['sampFreq'], psd, 1) # changed by ywq
         # estSig, _ = normsig4psd(estSig, inParams['sampFreq'], inParams['psdPosFreq'], 1)
-        estAmp = innerprodpsd(inParams['dataY'], estSig, inParams['sampFreq'], inParams['psdPosFreq']) # question? 加权内积不能获得振幅吧
+        print("这个位置？")
+        estAmp = innerprodpsd(inParams['dataY'], estSig, inParams['sampFreq'], psd) # changed
         estSig = estAmp * estSig
         allRunsOutput['estSig'] = estSig
         allRunsOutput['totalFuncEvals'] = outStruct[lpruns]['totalFuncEvals']
@@ -109,10 +112,10 @@ def crcbqcpsopsd(inParams, psoParams, nRuns):
     outResults['bestSig'] = outResults['allRunsOutput'][bestRun]['estSig']
 
     # 存储最佳运行的所有参数
-    outResults['r'] = outResults['allRunsOutput'][bestRun]['r']
-    outResults['m_c'] = outResults['allRunsOutput'][bestRun]['m_c']
-    outResults['tc'] = outResults['allRunsOutput'][bestRun]['tc']
-    outResults['phi_c'] = outResults['allRunsOutput'][bestRun]['phi_c'] / np.pi
+    outResults['m1'] = outResults['allRunsOutput'][bestRun]['m1']
+    outResults['m2'] = outResults['allRunsOutput'][bestRun]['m2']
+    outResults['f_lower'] = outResults['allRunsOutput'][bestRun]['f_lower']
+    outResults['samples_rate'] = outResults['allRunsOutput'][bestRun]['samples_rate']
     outResults['mlz'] = outResults['allRunsOutput'][bestRun]['mlz']
     outResults['y'] = outResults['allRunsOutput'][bestRun]['y']
     return outResults, outStruct
@@ -290,29 +293,35 @@ def crcbpso(fitfuncHandle, nDim, O=0, **varargin):
     returnData['bestFitness'] = gbestVal
     return returnData
 
-def crcbgenqcsig(dataX,r,m_c,tc,phi_c,mlz,y):
-    # phaseVec = qcCoefs[0]*dataX + qcCoefs[1]*dataX**2 + qcCoefs[2]*dataX**3
-    # sigVec = np.sin(2*np.pi*phaseVec)
-    # sigVec = snr*sigVec/np.linalg.norm(sigVec)
-    r = r * 1e6 * pc
-    m_c = m_c * M_sun
-    mlz =mlz * M_sun
-    theta = c ** 3* (tc - dataX) / (5 * G * m_c)
-    # print(f"theta:{theta}")
-    # 时域上的信号波形
-    h = G * m_c / (c ** 2 * r) * theta ** (-1/4) * np.cos(2 * phi_c - 2 * theta ** (5 / 8))
-    h_f = np.fft.rfft(h) # 时域到频域
-    freqs = np.fft.rfftfreq(len(h),dataX[1]-dataX[0]) # 频率
-    omega = 2 * np.pi * freqs 
-    w = G *4 * mlz * omega / c ** 3 
-    F_geo = np.sqrt(1 + 1/y) - 1j * np.lib.scimath.sqrt(-1 + 1/ y) * np.exp(1j * w * 2 * y) # 透镜效应
-    sigVec_f = h_f * F_geo # 给信号增加透镜效应（频域）
-    sigVec = np.fft.irfft(sigVec_f) # 转换到时域
-    # 转换到频域
-    # print(f"sigvec:{sigVec}")
-    # sigVec = 1 * sigVec / np.linalg.norm(sigVec)
-    # print(f"r:{r/1e6/pc}, m_c:{m_c/M_sun}, tc:{tc}, phi_c:{phi_c}, mlz:{mlz/M_sun}, y:{y},f_geo:{F_geo},sigvec:{sigVec}")
-    return sigVec
+def crcbgenqcsig(m1,m2,f_lower,sample_rate,mlz,y):
+    hp, _ = get_td_waveform(approximant="EOBNRv2",
+                         mass1=m1,
+                         mass2=m2,
+                         f_lower=f_lower,
+                         delta_t=1.0/sample_rate)
+    hp_f = np.fft.rfft(hp)
+
+
+    freqs = np.fft.rfftfreq(len(hp), d=hp.delta_t)
+    omega = 2 * np.pi * freqs
+    w = G * 4 *mlz * omega / c**3
+    F_geo = np.sqrt(1 + 1/y) - 1j * np.sqrt(-1 + 1 / y) * np.exp(1j * w * 2 * y)
+    # 将信号透镜化 （频域）
+    lens_f = hp_f * F_geo
+    # 逆傅里叶变换将频域信号转换为时域信号
+    hp_lens = np.fft.irfft(lens_f) 
+
+
+    tlen = len(hp)
+    print(f"tlen:{tlen}")
+
+    # Generate the aLIGO ZDHP PSD
+    print(f"hp.duration:{hp.duration}")
+    delta_f = 1.0 / hp.duration
+    print(f"delta_f:{delta_f}")
+    flen = tlen//2 + 1
+    psd = aLIGOZeroDetHighPower(flen, delta_f, f_lower)
+    return hp_lens,psd
 
 
 
@@ -358,18 +367,16 @@ def glrtqcsig4pso(xVec, params, returnxVec=0):
 def ssrqc(x, params):
     # Generate signal using crcbgenqcsig instead of phase model
     # 所有数据均排查完毕，无误
-    qc = crcbgenqcsig(params['dataX'], 
-                      x[0],  # r
-                      x[1],  # m_c
-                      x[2],  # tc
-                      x[3],  # phi_c
+    qc,psd = crcbgenqcsig(x[0],  # m1
+                      x[1],  # m2
+                      x[2],  # f_lower
+                      x[3],  # sample_rate
                       x[4],  # mlz
                       x[5],) # y
-    # print(qc)
     # Normalize signal using PSD
-    qc, _ = normsig4psd(qc, params['sampFreq'], params['psdPosFreq'], 1)
+    qc, _ = normsig4psd(qc, params['sampFreq'], psd, 1)
     # Compute fitness using inner product
-    inPrd = innerprodpsd(params['dataY'], qc, params['sampFreq'], params['psdPosFreq'])
+    inPrd = innerprodpsd(params['dataY'], qc, params['sampFreq'], psd)
     ssrVal = -(inPrd)**2
     return ssrVal
 
@@ -379,6 +386,7 @@ def normsig4psd(sigVec, sampFreq, psdVec, snr):
     """
     nSamples = len(sigVec)
     kNyq = np.floor(nSamples/2) + 1
+    print(f"knyq:{kNyq},psd:{len(psdVec)}")
     assert len(psdVec) == kNyq, 'Length of PSD is not correct'
     # Norm of signal squared is inner product of signal with itself
     normSigSqrd = innerprodpsd(sigVec,sigVec,sampFreq,psdVec)
@@ -390,10 +398,11 @@ def normsig4psd(sigVec, sampFreq, psdVec, snr):
 
 def innerprodpsd(xVec,yVec,sampFreq,psdVals):
     nSamples = len(xVec)
+    print(f"nsamples:{nSamples},yVex:{len(yVec)}")
     assert len(yVec) == nSamples, 'Vectors must be of the same length'
     kNyq = np.floor(nSamples/2)+1
     assert len(psdVals) == kNyq, 'PSD values must be specified at positive DFT frequencies'
-    
+    psd2 = psdVals
     # Why 'scipy.fftpack.fft'? 
     # See: https://iphysresearch.github.io/blog/post/signal_processing/fft/#efficiency-of-the-algorithms
     # 当被fft的数据中出现inf或者nan时，整个数据都会烂掉！
@@ -402,7 +411,19 @@ def innerprodpsd(xVec,yVec,sampFreq,psdVals):
     #We take care of even or odd number of samples when replicating PSD values
     #for negative frequencies
     negFStrt = 1 - np.mod(nSamples, 2)
-    psdVec4Norm = np.concatenate((psdVals, psdVals[(kNyq.astype('int')-negFStrt)-1:0:-1]))
+    print(f"nSamples={nSamples}, kNyq={kNyq}, negFStrt={negFStrt}")
+    # 在这个位置，第二个psdVals会重新生成，在生成的过程中会面临dalte_f为负值的情况
+    # 最大的问题是，这个变量为什么会重新生成呢？
+
+    # 提取原始数据数组
+    psd_data = psdVals.numpy()  # 或 psdVals.data
+    # 计算负频率部分
+    kNyq = int(kNyq)
+    start_idx = max(kNyq - negFStrt - 1, 0)
+    psd_neg = psd_data[start_idx:0:-1]
+
+    # 拼接为普通数组
+    psdVec4Norm = np.concatenate((psd_data, psd_neg))
     dataLen = sampFreq * nSamples
     innProd = np.sum((1/dataLen) * (fftX / psdVec4Norm)*fftY.conj())
     # print(f"innProd:{innProd}")
