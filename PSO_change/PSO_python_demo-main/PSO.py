@@ -8,6 +8,7 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from scipy.io import savemat
 # from numba import jit
 # from numba import njit, prange
+from multiprocessing import Pool
 # 常量定义
 G = 6.67430e-11  # 万有引力常数, m^3 kg^-1 s^-2
 c = 2.998e8  # 光速, m/s
@@ -24,97 +25,91 @@ __all__ = ['crcbqcpsopsd',
            's2rv',
            'crcbchkstdsrchrng']
 
+
+def run_single_pso(lprun, inParams, psoParams, nDim):
+    """并行运行的单个PSO实例"""
+    np.random.seed(lprun)
+    # 在子进程中重新创建目标函数句柄
+    fHandle = lambda x, returnxVec: glrtqcsig4pso(x, inParams, returnxVec)
+    result = crcbpso(fHandle, nDim, **psoParams)
+    return (lprun, result)
+
+
 def crcbqcpsopsd(inParams, psoParams, nRuns):
     nSamples = len(inParams['dataX'])
     nDim = 6
-    fHandle = lambda x, returnxVec: glrtqcsig4pso(x, inParams, returnxVec)
-
-    outStruct = [{} for _ in range(nRuns)]
     outResults = {
         'allRunsOutput': [],
         'bestRun': None,
         'bestFitness': None,
         'bestSig': np.zeros(nSamples),
-        # 'bestQcCoefs': np.zeros(3),
-        # 'bestSNR': None,
-        # 'bestAmp':None,
         'r': None,
         'm_c': None,
         'tc': None,
         'phi_c': None,
-        'mlz': None, 
+        'mlz': None,
         'y': None,
     }
-    # print(f"r:{r}, m_c:{m_c}, tc:{tc}, phi_c:{phi_c}, w:{w}, y:{y}")
-    # Allocate storage for outputs: results from all runs are stored
-    outStruct = [outStruct for _ in range(nRuns)]
-    
-    # Independent runs of PSO [TODO: runing in parallel.]
-    for lpruns in range(nRuns):
-        # Reset random number generator for each run
-        np.random.seed(lpruns)
-        outStruct[lpruns] = crcbpso(fHandle,nDim,**psoParams)
-        # Below codes are used for checking qcCoefs for current lprun.
-        #_, qcCoefs = fHandle(outStruct[lpruns]['bestLocation'][np.newaxis,...], returnxVec=1)
-        #print(qcCoefs)
 
-    #Prepare output
+    # 准备并行参数
+    args = [(lr, inParams, psoParams, nDim) for lr in range(nRuns)]
+
+    # 并行执行PSO
+    with Pool() as pool:
+        results = pool.starmap(run_single_pso, args)
+
+    # 整理结果
+    outStruct = [{} for _ in range(nRuns)]
+    for lprun, res in results:
+        outStruct[lprun] = res
+
+    # 后续结果处理（保持原逻辑）
     fitVal = np.zeros(nRuns)
     for lpruns in range(nRuns):
         allRunsOutput = {
             'fitVal': 0,
-            #'qcCoefs': np.zeros(3),
-            'r':0,
-            'm_c':0,
-            'tc':0,
-            'phi_c':0,
-            'mlz':0,
-            'y':0,
+            'r': 0,
+            'm_c': 0,
+            'tc': 0,
+            'phi_c': 0,
+            'mlz': 0,
+            'y': 0,
             'estSig': 0,
             'totalFuncEvals': [],
-            #'snr': [],
         }
         fitVal[lpruns] = outStruct[lpruns]['bestFitness']
         allRunsOutput['fitVal'] = fitVal[lpruns]
-        _, params = fHandle(outStruct[lpruns]['bestLocation'][np.newaxis, ...], returnxVec=1)
-        r = params[0,0]
-        m_c = params[0,1]
-        tc = params[0,2]
-        phi_c = params[0,3]
-        mlz = 10 ** params[0,4]
-        y = params[0,5]
-        # print(f"r:{r}, m_c:{m_c}, tc:{tc}, phi_c:{phi_c}, mlz:{mlz}, y:{y}")
-        # allRunsOutput['qcCoefs'] = qcCoefs[0]
-        allRunsOutput['r'] = r
-        allRunsOutput['m_c'] = m_c
-        allRunsOutput['tc'] = tc
-        allRunsOutput['phi_c'] = phi_c
-        allRunsOutput['mlz'] = mlz
-        allRunsOutput['y'] = y
-        estSig = crcbgenqcsig(inParams['dataX'], r,m_c,tc,phi_c,mlz,y)  # changed by ywq
-        # estSig = crcbgenqcsig(inParams['dataX'], 1, qcCoefs[0])
-        estSig, _ = normsig4psd(estSig, inParams['sampFreq'], inParams['psdPosFreq'], 1) # changed by ywq
-        # estSig, _ = normsig4psd(estSig, inParams['sampFreq'], inParams['psdPosFreq'], 1)
-        estAmp = innerprodpsd(inParams['dataY'], estSig, inParams['sampFreq'], inParams['psdPosFreq']) # question? 加权内积不能获得振幅吧
-        estSig = estAmp * estSig
-        allRunsOutput['estSig'] = estSig
+        _, params = glrtqcsig4pso(outStruct[lpruns]['bestLocation'][np.newaxis, ...], inParams, returnxVec=1)
+        r, m_c, tc, phi_c, mlz, y = params[0]
+        allRunsOutput.update({
+            'r': r,
+            'm_c': m_c,
+            'tc': tc,
+            'phi_c': phi_c,
+            'mlz': mlz,
+            'y': y
+        })
+        estSig = crcbgenqcsig(inParams['dataX'], r, m_c, tc, phi_c, mlz, y)
+        estSig, _ = normsig4psd(estSig, inParams['sampFreq'], inParams['psdPosFreq'], 1)
+        estAmp = innerprodpsd(inParams['dataY'], estSig, inParams['sampFreq'], inParams['psdPosFreq'])
+        allRunsOutput['estSig'] = estAmp * estSig
         allRunsOutput['totalFuncEvals'] = outStruct[lpruns]['totalFuncEvals']
         outResults['allRunsOutput'].append(allRunsOutput)
 
-        
-    # 找到最佳运行
+    # 确定最佳结果
     bestRun = np.argmin(fitVal)
-    outResults['bestRun'] = bestRun
-    outResults['bestFitness'] = outResults['allRunsOutput'][bestRun]['fitVal']
-    outResults['bestSig'] = outResults['allRunsOutput'][bestRun]['estSig']
+    outResults.update({
+        'bestRun': bestRun,
+        'bestFitness': outResults['allRunsOutput'][bestRun]['fitVal'],
+        'bestSig': outResults['allRunsOutput'][bestRun]['estSig'],
+        'r': outResults['allRunsOutput'][bestRun]['r'],
+        'm_c': outResults['allRunsOutput'][bestRun]['m_c'],
+        'tc': outResults['allRunsOutput'][bestRun]['tc'],
+        'phi_c': outResults['allRunsOutput'][bestRun]['phi_c'],
+        'mlz': outResults['allRunsOutput'][bestRun]['mlz'],
+        'y': outResults['allRunsOutput'][bestRun]['y'],
+    })
 
-    # 存储最佳运行的所有参数
-    outResults['r'] = outResults['allRunsOutput'][bestRun]['r']
-    outResults['m_c'] = outResults['allRunsOutput'][bestRun]['m_c']
-    outResults['tc'] = outResults['allRunsOutput'][bestRun]['tc']
-    outResults['phi_c'] = outResults['allRunsOutput'][bestRun]['phi_c'] / np.pi
-    outResults['mlz'] = outResults['allRunsOutput'][bestRun]['mlz']
-    outResults['y'] = outResults['allRunsOutput'][bestRun]['y']
     return outResults, outStruct
 
 def crcbpso(fitfuncHandle, nDim, O=0, **varargin):
@@ -291,21 +286,35 @@ def crcbpso(fitfuncHandle, nDim, O=0, **varargin):
     return returnData
 
 def crcbgenqcsig(dataX,r,m_c,tc,phi_c,mlz,y):
-    # phaseVec = qcCoefs[0]*dataX + qcCoefs[1]*dataX**2 + qcCoefs[2]*dataX**3
-    # sigVec = np.sin(2*np.pi*phaseVec)
-    # sigVec = snr*sigVec/np.linalg.norm(sigVec)
-    r = r * 1e6 * pc
-    m_c = m_c * M_sun
-    mlz =mlz * M_sun
-    theta = c ** 3* (tc - dataX) / (5 * G * m_c)
+    # print(f"r:{r},mlz:{mlz},m_c:{m_c},phi:{phi_c}")
+    r = (10 **  r) * 1e6 *  pc
+    m_c =  (10 ** m_c) * M_sun
+    mlz =(10 ** mlz) * M_sun
+    # theta = c ** 3* (tc - dataX) / (5 * G * m_c)
+    # print(f"r:{r/1e6/pc},mlz:{mlz/M_sun:.2e},m_c:{m_c/M_sun:.2e},phi:{phi_c/np.pi}")
     # print(f"theta:{theta}")
     # 时域上的信号波形
-    h = G * m_c / (c ** 2 * r) * theta ** (-1/4) * np.cos(2 * phi_c - 2 * theta ** (5 / 8))
+    # h = G * m_c / (c ** 2 * r) * theta ** (-1/4) * np.cos(2 * phi_c - 2 * theta ** (5 / 8))
+    def generate_h_t(dataX,m_c,r,phi_c):
+        if dataX < tc:
+            theta_t = c **3 * (tc - dataX) / (5 * G * m_c)
+            h = G * m_c/(c ** 2 * r) * theta_t**(-1/4) * np.cos(2 * phi_c - 2*theta_t ** (5/8))
+        else :
+            h = 0
+        return h
+    generate_h_t=np.frompyfunc(generate_h_t, 4, 1)
+    h = generate_h_t(dataX,m_c,r,phi_c).astype(float)
+
     h_f = np.fft.rfft(h) # 时域到频域
+
     freqs = np.fft.rfftfreq(len(h),dataX[1]-dataX[0]) # 频率
     omega = 2 * np.pi * freqs 
     w = G *4 * mlz * omega / c ** 3 
-    F_geo = np.sqrt(1 + 1/y) - 1j * np.lib.scimath.sqrt(-1 + 1/ y) * np.exp(1j * w * 2 * y) # 透镜效应
+    # F_geo = np.sqrt(1 + 1/y) - 1j * np.lib.scimath.sqrt(-1 + 1/ y) * np.exp(1j * w * 2 * y) # 透镜效应
+    if y <1:
+        F_geo = np.sqrt(1 + 1/y) - 1j*np.sqrt(-1 +1/y) * np.exp(1j * w * 2 *y)
+    else :
+        F_geo = np.sqrt(1 + 1/y)
     sigVec_f = h_f * F_geo # 给信号增加透镜效应（频域）
     sigVec = np.fft.irfft(sigVec_f) # 转换到时域
     # 转换到频域
@@ -357,7 +366,6 @@ def glrtqcsig4pso(xVec, params, returnxVec=0):
 #     return ssrVal
 def ssrqc(x, params):
     # Generate signal using crcbgenqcsig instead of phase model
-    # 所有数据均排查完毕，无误
     qc = crcbgenqcsig(params['dataX'], 
                       x[0],  # r
                       x[1],  # m_c
@@ -393,10 +401,9 @@ def innerprodpsd(xVec,yVec,sampFreq,psdVals):
     assert len(yVec) == nSamples, 'Vectors must be of the same length'
     kNyq = np.floor(nSamples/2)+1
     assert len(psdVals) == kNyq, 'PSD values must be specified at positive DFT frequencies'
-    
+
     # Why 'scipy.fftpack.fft'? 
     # See: https://iphysresearch.github.io/blog/post/signal_processing/fft/#efficiency-of-the-algorithms
-    # 当被fft的数据中出现inf或者nan时，整个数据都会烂掉！
     fftX = np.fft.fft(xVec)
     fftY = np.fft.fft(yVec)
     #We take care of even or odd number of samples when replicating PSD values
