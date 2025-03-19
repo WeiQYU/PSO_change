@@ -26,23 +26,20 @@ __all__ = ['crcbqcpsopsd',
            'crcbchkstdsrchrng']
 
 
-def run_single_pso(lprun, inParams, psoParams, nDim):
-    """并行运行的单个PSO实例"""
-    np.random.seed(lprun)
-    # 在子进程中重新创建目标函数句柄
-    fHandle = lambda x, returnxVec: glrtqcsig4pso(x, inParams, returnxVec)
-    result = crcbpso(fHandle, nDim, **psoParams)
-    return (lprun, result)
-
-
 def crcbqcpsopsd(inParams, psoParams, nRuns):
     nSamples = len(inParams['dataX'])
     nDim = 6
+    fHandle = lambda x, returnxVec: glrtqcsig4pso(x, inParams, returnxVec)
+
+    outStruct = [{} for _ in range(nRuns)]
     outResults = {
         'allRunsOutput': [],
         'bestRun': None,
         'bestFitness': None,
         'bestSig': np.zeros(nSamples),
+        # 'bestQcCoefs': np.zeros(3),
+        # 'bestSNR': None,
+        # 'bestAmp':None,
         'r': None,
         'm_c': None,
         'tc': None,
@@ -50,24 +47,25 @@ def crcbqcpsopsd(inParams, psoParams, nRuns):
         'mlz': None,
         'y': None,
     }
+    # print(f"r:{r}, m_c:{m_c}, tc:{tc}, phi_c:{phi_c}, w:{w}, y:{y}")
+    # Allocate storage for outputs: results from all runs are stored
+    outStruct = [outStruct for _ in range(nRuns)]
 
-    # 准备并行参数
-    args = [(lr, inParams, psoParams, nDim) for lr in range(nRuns)]
+    # Independent runs of PSO [TODO: runing in parallel.]
+    for lpruns in range(nRuns):
+        # Reset random number generator for each run
+        np.random.seed(lpruns)
+        outStruct[lpruns] = crcbpso(fHandle, nDim, **psoParams)
+        # Below codes are used for checking qcCoefs for current lprun.
+        # _, qcCoefs = fHandle(outStruct[lpruns]['bestLocation'][np.newaxis,...], returnxVec=1)
+        # print(qcCoefs)
 
-    # 并行执行PSO
-    with Pool() as pool:
-        results = pool.starmap(run_single_pso, args)
-
-    # 整理结果
-    outStruct = [{} for _ in range(nRuns)]
-    for lprun, res in results:
-        outStruct[lprun] = res
-
-    # 后续结果处理（保持原逻辑）
+    # Prepare output
     fitVal = np.zeros(nRuns)
     for lpruns in range(nRuns):
         allRunsOutput = {
             'fitVal': 0,
+            # 'qcCoefs': np.zeros(3),
             'r': 0,
             'm_c': 0,
             'tc': 0,
@@ -76,40 +74,49 @@ def crcbqcpsopsd(inParams, psoParams, nRuns):
             'y': 0,
             'estSig': 0,
             'totalFuncEvals': [],
+            # 'snr': [],
         }
         fitVal[lpruns] = outStruct[lpruns]['bestFitness']
         allRunsOutput['fitVal'] = fitVal[lpruns]
-        _, params = glrtqcsig4pso(outStruct[lpruns]['bestLocation'][np.newaxis, ...], inParams, returnxVec=1)
-        r, m_c, tc, phi_c, mlz, y = params[0]
-        allRunsOutput.update({
-            'r': r,
-            'm_c': m_c,
-            'tc': tc,
-            'phi_c': phi_c,
-            'mlz': mlz,
-            'y': y
-        })
-        estSig = crcbgenqcsig(inParams['dataX'], r, m_c, tc, phi_c, mlz, y)
-        estSig, _ = normsig4psd(estSig, inParams['sampFreq'], inParams['psdPosFreq'], 1)
-        estAmp = innerprodpsd(inParams['dataY'], estSig, inParams['sampFreq'], inParams['psdPosFreq'])
-        allRunsOutput['estSig'] = estAmp * estSig
+        _, params = fHandle(outStruct[lpruns]['bestLocation'][np.newaxis, ...], returnxVec=1)
+        r = params[0, 0]
+        m_c = params[0, 1]
+        tc = params[0, 2]
+        phi_c = params[0, 3]
+        mlz = params[0, 4]
+        y = params[0, 5]
+        # print(f"r:{r}, m_c:{m_c}, tc:{tc}, phi_c:{phi_c}, mlz:{mlz}, y:{y}")
+        # allRunsOutput['qcCoefs'] = qcCoefs[0]
+        allRunsOutput['r'] = r
+        allRunsOutput['m_c'] = m_c
+        allRunsOutput['tc'] = tc
+        allRunsOutput['phi_c'] = phi_c
+        allRunsOutput['mlz'] = mlz
+        allRunsOutput['y'] = y
+        estSig = crcbgenqcsig(inParams['dataX'], r, m_c, tc, phi_c, mlz, y)  # changed by ywq
+        # estSig = crcbgenqcsig(inParams['dataX'], 1, qcCoefs[0])
+        estSig, _ = normsig4psd(estSig, inParams['sampFreq'], inParams['psdPosFreq'], 1)  # changed by ywq
+        # estSig, _ = normsig4psd(estSig, inParams['sampFreq'], inParams['psdPosFreq'], 1)
+        estAmp = innerprodpsd(inParams['dataY'], estSig, inParams['sampFreq'],
+                              inParams['psdPosFreq'])  # question? 加权内积不能获得振幅吧
+        estSig = estAmp * estSig
+        allRunsOutput['estSig'] = estSig
         allRunsOutput['totalFuncEvals'] = outStruct[lpruns]['totalFuncEvals']
         outResults['allRunsOutput'].append(allRunsOutput)
 
-    # 确定最佳结果
+    # 找到最佳运行
     bestRun = np.argmin(fitVal)
-    outResults.update({
-        'bestRun': bestRun,
-        'bestFitness': outResults['allRunsOutput'][bestRun]['fitVal'],
-        'bestSig': outResults['allRunsOutput'][bestRun]['estSig'],
-        'r': outResults['allRunsOutput'][bestRun]['r'],
-        'm_c': outResults['allRunsOutput'][bestRun]['m_c'],
-        'tc': outResults['allRunsOutput'][bestRun]['tc'],
-        'phi_c': outResults['allRunsOutput'][bestRun]['phi_c'],
-        'mlz': outResults['allRunsOutput'][bestRun]['mlz'],
-        'y': outResults['allRunsOutput'][bestRun]['y'],
-    })
+    outResults['bestRun'] = bestRun
+    outResults['bestFitness'] = outResults['allRunsOutput'][bestRun]['fitVal']
+    outResults['bestSig'] = outResults['allRunsOutput'][bestRun]['estSig']
 
+    # 存储最佳运行的所有参数
+    outResults['r'] = outResults['allRunsOutput'][bestRun]['r']
+    outResults['m_c'] = outResults['allRunsOutput'][bestRun]['m_c']
+    outResults['tc'] = outResults['allRunsOutput'][bestRun]['tc']
+    outResults['phi_c'] = outResults['allRunsOutput'][bestRun]['phi_c']
+    outResults['mlz'] = outResults['allRunsOutput'][bestRun]['mlz']
+    outResults['y'] = outResults['allRunsOutput'][bestRun]['y']
     return outResults, outStruct
 
 def crcbpso(fitfuncHandle, nDim, O=0, **varargin):

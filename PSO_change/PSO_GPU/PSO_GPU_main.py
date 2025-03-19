@@ -10,8 +10,15 @@ c = 2.998e8  # 光速, m/s
 M_sun = 1.989e30  # 太阳质量, kg
 pc = 3.086e16  # pc到m的转换
 
-__all__ = ['crcbqcpsopsd', 'crcbpso', 'crcbgenqcsig', 'glrtqcsig4pso',
-           'ssrqc', 'normsig4psd', 'innerprodpsd', 's2rv', 'crcbchkstdsrchrng']
+__all__ = ['crcbqcpsopsd',
+           'crcbpso',
+           'crcbgenqcsig',
+           'glrtqcsig4pso',
+           'ssrqc',
+           'normsig4psd',
+           'innerprodpsd',
+           's2rv',
+           'crcbchkstdsrchrng']
 
 
 def crcbqcpsopsd(inParams, psoParams, nRuns):
@@ -19,8 +26,8 @@ def crcbqcpsopsd(inParams, psoParams, nRuns):
     inParams['dataX'] = cp.asarray(inParams['dataX'])
     inParams['dataY'] = cp.asarray(inParams['dataY'])
     inParams['psdPosFreq'] = cp.asarray(inParams['psdPosFreq'])
-    inParams['rmax'] = cp.asarray(inParams['rmax'])  # 新增
-    inParams['rmin'] = cp.asarray(inParams['rmin'])  # 新增
+    inParams['rmax'] = cp.asarray(inParams['rmax'])
+    inParams['rmin'] = cp.asarray(inParams['rmin'])
 
     nSamples = len(inParams['dataX'])
     nDim = 6
@@ -41,16 +48,23 @@ def crcbqcpsopsd(inParams, psoParams, nRuns):
     }
 
     for lpruns in range(nRuns):
-        cp.random.seed(lpruns)
-        outStruct[lpruns] = crcbpso(fHandle, nDim, **psoParams)
+        # 传递当前Run序号到PSO参数
+        currentPSOParams = psoParams.copy()
+        currentPSOParams['run'] = lpruns + 1  # 添加序号，从1开始
+
+        outStruct[lpruns] = crcbpso(fHandle, nDim, **currentPSOParams)
 
     # 在CPU处理最终结果
     fitVal = cp.zeros(nRuns)
     for lpruns in range(nRuns):
         allRunsOutput = {
             'fitVal': 0,
-            'r': 0, 'm_c': 0, 'tc': 0,
-            'phi_c': 0, 'mlz': 0, 'y': 0,
+            'r': 0,
+            'm_c': 0,
+            'tc': 0,
+            'phi_c': 0,
+            'mlz': 0,
+            'y': 0,
             'estSig': cp.zeros(nSamples),
             'totalFuncEvals': [],
         }
@@ -68,8 +82,12 @@ def crcbqcpsopsd(inParams, psoParams, nRuns):
 
         allRunsOutput.update({
             'fitVal': float(fitVal[lpruns].get()),
-            'r': r, 'm_c': m_c, 'tc': tc,
-            'phi_c': phi_c, 'mlz': mlz, 'y': y,
+            'r': r,
+            'm_c': m_c,
+            'tc': tc,
+            'phi_c': phi_c,
+            'mlz': mlz,
+            'y': y,
             'estSig': cp.asnumpy(estSig),
             'totalFuncEvals': outStruct[lpruns]['totalFuncEvals']
         })
@@ -90,20 +108,33 @@ def crcbqcpsopsd(inParams, psoParams, nRuns):
     return outResults, outStruct
 
 
-def crcbpso(fitfuncHandle, nDim, O=0, **varargin):
+def crcbpso(fitfuncHandle, nDim, O=0, **kwargs):
+    # 默认参数设置
     psoParams = {
-        'popsize': 40, 'maxSteps': 2000,
-        'c1': 2, 'c2': 2, 'max_velocity': 0.5,
-        'dcLaw_a': 0.9, 'dcLaw_b': 0.4,
-        'dcLaw_c': 2000 - 1, 'dcLaw_d': 0.2,
-        'bndryCond': '', 'nbrhdSz': 3
+        'popsize': 40,
+        'maxSteps': 2000,
+        'c1': 2,
+        'c2': 2,
+        'max_velocity': 0.5,
+        'dcLaw_a': 0.9,
+        'dcLaw_b': 0.4,
+        'dcLaw_c': 2000 - 1,
+        'dcLaw_d': 0.2,
+        'bndryCond': '',
+        'nbrhdSz': 3
     }
-    psoParams.update(varargin)
 
+    # 更新参数
+    psoParams.update(kwargs)
+
+    # 获取当前Run序号
+    run = psoParams.get('run', 1)  # 默认序号为1
+
+    # 初始化返回数据
     returnData = {
-        'totalFuncEvals': [],
+        'totalFuncEvals': 0,
         'bestLocation': cp.zeros((1, nDim)),
-        'bestFitness': [],
+        'bestFitness': cp.inf,
     }
 
     # GPU矩阵初始化
@@ -114,7 +145,7 @@ def crcbpso(fitfuncHandle, nDim, O=0, **varargin):
     partFitCurrCols = partFitPbestCols + 1
     partFitLbestCols = partFitCurrCols + 1
     partInertiaCols = partFitLbestCols + 1
-    partLocalBestCols = slice(partInertiaCols, partInertiaCols + nDim)
+    partLocalBestCols = slice(partInertiaCols + 1, partInertiaCols + 1 + nDim)
     partFlagFitEvalCols = partLocalBestCols.stop
     partFitEvalsCols = partFlagFitEvalCols + 1
 
@@ -134,58 +165,82 @@ def crcbpso(fitfuncHandle, nDim, O=0, **varargin):
     pop[:, partFitEvalsCols] = 0
 
     gbestVal = cp.inf
-    gbestLoc = 2 * cp.ones((1, nDim))
+    gbestLoc = cp.ones((1, nDim))
 
-    for lpc_steps in tqdm(range(psoParams['maxSteps'])):
-        if psoParams['bndryCond']:
-            fitnessValues, pop[:, partCoordCols] = fitfuncHandle(pop[:, partCoordCols], returnxVec=1)
-        else:
-            fitnessValues = fitfuncHandle(pop[:, partCoordCols], returnxVec=0)
-        # 在使用 fitnessValues 之前，确保它是 CuPy 数组
-        if isinstance(fitnessValues, np.ndarray):
-            fitnessValues = cp.asarray(fitnessValues)
+    # 跟踪总评估次数
+    total_evals = 0
 
-        pop[:, partFitCurrCols] = fitnessValues
-        update_mask = pop[:, partFitPbestCols] > pop[:, partFitCurrCols]
-        pop[update_mask, partFitPbestCols] = pop[update_mask, partFitCurrCols]
-        pop[update_mask, partPbestCols] = pop[update_mask, partCoordCols]
+    # 带序号的进度条
+    with tqdm(
+            range(psoParams['maxSteps']),
+            desc=f'Run {run}',
+            position=0,
+            leave=True
+    ) as pbar:
+        for lpc_steps in pbar:
+            # 计算适应度
+            if psoParams['bndryCond']:
+                fitnessValues, pop[:, partCoordCols] = fitfuncHandle(pop[:, partCoordCols], returnxVec=1)
+            else:
+                fitnessValues = fitfuncHandle(pop[:, partCoordCols], returnxVec=0)
 
-        bestFitness = cp.min(pop[:, partFitCurrCols])
-        if gbestVal > bestFitness:
-            gbestVal = bestFitness
-            bestParticle = cp.argmin(pop[:, partFitCurrCols])
-            gbestLoc = pop[bestParticle, partCoordCols]
+            # 确保fitnessValues是CuPy数组
+            if isinstance(fitnessValues, np.ndarray):
+                fitnessValues = cp.asarray(fitnessValues)
 
-        # 局部最优更新 (使用GPU矩阵运算优化)
-        ringIndices = cp.arange(psoParams['popsize']).reshape(-1, 1) + cp.arange(psoParams['nbrhdSz'])
-        ringIndices %= psoParams['popsize']
-        minIndices = cp.argmin(pop[ringIndices, partFitCurrCols], axis=1)
-        lbestLoc = pop[ringIndices[cp.arange(psoParams['popsize']), minIndices], partCoordCols]
+            # 更新总评估次数
+            total_evals += psoParams['popsize']
 
-        pop[:, partLocalBestCols] = lbestLoc
-        pop[:, partFitLbestCols] = pop[ringIndices[cp.arange(psoParams['popsize']), minIndices], partFitCurrCols]
+            # 更新当前适应度和个体最优
+            pop[:, partFitCurrCols] = fitnessValues
+            update_mask = pop[:, partFitPbestCols] > pop[:, partFitCurrCols]
+            pop[update_mask, partFitPbestCols] = pop[update_mask, partFitCurrCols]
+            pop[update_mask, partPbestCols] = pop[update_mask, partCoordCols]
 
-        # 速度更新
-        inertiaWt = cp.maximum(psoParams['dcLaw_a'] - (psoParams['dcLaw_b'] / psoParams['dcLaw_c']) * lpc_steps,
-                               psoParams['dcLaw_d'])
-        chi1 = cp.random.rand(psoParams['popsize'], nDim)
-        chi2 = cp.random.rand(psoParams['popsize'], nDim)
+            # 更新全局最优
+            bestFitness = cp.min(pop[:, partFitCurrCols])
+            if gbestVal > bestFitness:
+                gbestVal = bestFitness
+                bestParticle = cp.argmin(pop[:, partFitCurrCols])
+                gbestLoc = pop[bestParticle, partCoordCols]
 
-        pop[:, partVelCols] = (inertiaWt * pop[:, partVelCols] +
-                               psoParams['c1'] * (pop[:, partPbestCols] - pop[:, partCoordCols]) * chi1 +
-                               psoParams['c2'] * (pop[:, partLocalBestCols] - pop[:, partCoordCols]) * chi2)
-        pop[:, partVelCols] = cp.clip(pop[:, partVelCols], -psoParams['max_velocity'], psoParams['max_velocity'])
-        pop[:, partCoordCols] += pop[:, partVelCols]
+            # 局部最优更新
+            ringIndices = cp.arange(psoParams['popsize']).reshape(-1, 1) + cp.arange(psoParams['nbrhdSz'])
+            ringIndices %= psoParams['popsize']
+            minIndices = cp.argmin(pop[ringIndices, partFitCurrCols], axis=1)
+            lbestLoc = pop[ringIndices[cp.arange(psoParams['popsize']), minIndices], partCoordCols]
 
-        invalid = cp.any((pop[:, partCoordCols] < 0) | (pop[:, partCoordCols] > 1), axis=1)
-        pop[invalid, partFitCurrCols] = cp.inf
-        pop[invalid, partFlagFitEvalCols] = 0
+            pop[:, partLocalBestCols] = lbestLoc
+            pop[:, partFitLbestCols] = pop[ringIndices[cp.arange(psoParams['popsize']), minIndices], partFitCurrCols]
 
+            # 速度更新
+            inertiaWt = cp.maximum(psoParams['dcLaw_a'] - (psoParams['dcLaw_b'] / psoParams['dcLaw_c']) * lpc_steps,
+                                   psoParams['dcLaw_d'])
+            chi1 = cp.random.rand(psoParams['popsize'], nDim)
+            chi2 = cp.random.rand(psoParams['popsize'], nDim)
+
+            pop[:, partVelCols] = (inertiaWt * pop[:, partVelCols] +
+                                   psoParams['c1'] * (pop[:, partPbestCols] - pop[:, partCoordCols]) * chi1 +
+                                   psoParams['c2'] * (pop[:, partLocalBestCols] - pop[:, partCoordCols]) * chi2)
+
+            # 限制速度
+            pop[:, partVelCols] = cp.clip(pop[:, partVelCols], -psoParams['max_velocity'], psoParams['max_velocity'])
+
+            # 更新位置
+            pop[:, partCoordCols] += pop[:, partVelCols]
+
+            # 边界处理
+            invalid = cp.any((pop[:, partCoordCols] < 0) | (pop[:, partCoordCols] > 1), axis=1)
+            pop[invalid, partFitCurrCols] = cp.inf
+            pop[invalid, partFlagFitEvalCols] = 0
+
+    # 准备返回数据
     returnData.update({
-        'totalFuncEvals': int(cp.sum(pop[:, partFitEvalsCols]).get()),
+        'totalFuncEvals': total_evals,
         'bestLocation': cp.asnumpy(gbestLoc),
         'bestFitness': float(gbestVal.get())
     })
+
     return returnData
 
 
@@ -194,37 +249,32 @@ def crcbgenqcsig(dataX, r, m_c, tc, phi_c, mlz, y):
     m_c = (10 ** m_c) * M_sun
     mlz = (10 ** mlz) * M_sun
 
-    # GPU向量化运算
     theta_t = c ** 3 * (tc - dataX) / (5 * G * m_c)
     theta_t = cp.where(dataX < tc, theta_t, 0)
-    h = G * m_c / (c ** 2 * r) * theta_t ** (-0.25) * cp.cos(2 * phi_c - 2 * theta_t ** (0.625))
+    h = G * m_c / (c ** 2 * r) * theta_t ** (-1 / 4) * cp.cos(2 * phi_c - 2 * theta_t ** (5 / 8))
     h = cp.where(dataX >= tc, 0, h)
 
     h_f = cp.fft.rfft(h)
     freqs = cp.fft.rfftfreq(len(dataX), d=cp.diff(dataX)[0])
     omega = 2 * cp.pi * freqs
     w = G * 4 * mlz * omega / c ** 3
-
-    F_geo = cp.sqrt(1 + 1 / y) - 1j * cp.sqrt(cp.abs(-1 + 1 / y)) * cp.exp(1j * w * 2 * y)
+    F_geo = cp.sqrt(1 + 1 / y) - 1j * cp.sqrt(-1 + 1 / y) * cp.exp(1j * w * 2 * y)
     F_geo = cp.where(y >= 1, cp.sqrt(1 + 1 / y), F_geo)
-
     sigVec_f = h_f * F_geo
     return cp.fft.irfft(sigVec_f)
 
 
 def glrtqcsig4pso(xVec, params, returnxVec=0):
-    # 确保 xVec 是 CuPy 数组
     if isinstance(xVec, np.ndarray):
         xVec = cp.asarray(xVec)
-    validPts = crcbchkstdsrchrng(xVec)  # 返回 CuPy 数组
-    # 显式保留在 GPU
+    validPts = crcbchkstdsrchrng(xVec)
     xVec_valid = xVec[validPts]
-    xVec[validPts] = s2rv(xVec_valid, params)  # 直接传递 CuPy 数组
+    xVec[validPts] = s2rv(xVec_valid, params)
 
     fitVal = cp.full(xVec.shape[0], cp.inf)
     validIndices = cp.where(validPts)[0]
 
-    for idx in validIndices.get().tolist():  # 分批处理避免内存不足
+    for idx in validIndices.get().tolist():
         x = xVec[idx]
         fitVal[idx] = ssrqc(x, params)
 
@@ -240,7 +290,6 @@ def ssrqc(x, params):
 
 def normsig4psd(sigVec, sampFreq, psdVec, snr):
     nSamples = len(sigVec)
-    kNyq = nSamples // 2 + 1
     psdVec4Norm = cp.concatenate([psdVec, psdVec[-2:0:-1]])
     normSigSqrd = cp.sum((cp.fft.fft(sigVec) / psdVec4Norm) * cp.conj(cp.fft.fft(sigVec))) / (sampFreq * nSamples)
     normFac = snr / cp.sqrt(normSigSqrd)
@@ -261,8 +310,6 @@ def s2rv(xVec, params):
 
 
 def crcbchkstdsrchrng(xVec):
-    # 强制输入为 CuPy 数组
     if not isinstance(xVec, cp.ndarray):
         xVec = cp.asarray(xVec)
-    # 返回 CuPy 布尔数组
     return cp.all((xVec >= 0) & (xVec <= 1), axis=1)
