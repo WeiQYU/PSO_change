@@ -1,28 +1,21 @@
 import cupy as cp
 from cupyx.scipy.fftpack import fft
 from tqdm import tqdm
-from scipy.io import savemat
 import numpy as np
 
-# 常量定义
-G = 6.67430e-11  # 万有引力常数, m^3 kg^-1 s^-2
-c = 2.998e8  # 光速, m/s
-M_sun = 1.989e30  # 太阳质量, kg
-pc = 3.086e16  # pc到m的转换
+# Constants
+G = 6.67430e-11  # Gravitational constant, m^3 kg^-1 s^-2
+c = 2.998e8      # Speed of light, m/s
+M_sun = 1.989e30 # Solar mass, kg
+pc = 3.086e16    # Parsec to meters
 
-__all__ = ['crcbqcpsopsd',
-           'crcbpso',
-           'crcbgenqcsig',
-           'glrtqcsig4pso',
-           'ssrqc',
-           'normsig4psd',
-           'innerprodpsd',
-           's2rv',
-           'crcbchkstdsrchrng']
-
+__all__ = [
+    'crcbqcpsopsd', 'crcbpso', 'crcbgenqcsig', 'glrtqcsig4pso',
+    'ssrqc', 'normsig4psd', 'innerprodpsd', 's2rv', 'crcbchkstdsrchrng'
+]
 
 def crcbqcpsopsd(inParams, psoParams, nRuns):
-    # 将输入数据转移到GPU
+    # Transfer data to GPU
     inParams['dataX'] = cp.asarray(inParams['dataX'])
     inParams['dataY'] = cp.asarray(inParams['dataY'])
     inParams['psdPosFreq'] = cp.asarray(inParams['psdPosFreq'])
@@ -48,13 +41,10 @@ def crcbqcpsopsd(inParams, psoParams, nRuns):
     }
 
     for lpruns in range(nRuns):
-        # 传递当前Run序号到PSO参数
         currentPSOParams = psoParams.copy()
-        currentPSOParams['run'] = lpruns + 1  # 添加序号，从1开始
-
+        currentPSOParams['run'] = lpruns + 1
         outStruct[lpruns] = crcbpso(fHandle, nDim, **currentPSOParams)
 
-    # 在CPU处理最终结果
     fitVal = cp.zeros(nRuns)
     for lpruns in range(nRuns):
         allRunsOutput = {
@@ -70,8 +60,6 @@ def crcbqcpsopsd(inParams, psoParams, nRuns):
         }
         fitVal[lpruns] = outStruct[lpruns]['bestFitness']
         _, params = fHandle(outStruct[lpruns]['bestLocation'][cp.newaxis, ...], returnxVec=1)
-
-        # 将GPU数据转回CPU
         params = cp.asnumpy(params[0])
         r, m_c, tc, phi_c, mlz, y = params
 
@@ -107,11 +95,9 @@ def crcbqcpsopsd(inParams, psoParams, nRuns):
     })
     return outResults, outStruct
 
-
-def crcbpso(fitfuncHandle, nDim, O=0, **kwargs):
-    # 默认参数设置
+def crcbpso(fitfuncHandle, nDim, **kwargs):
     psoParams = {
-        'popsize': 40,
+        'popsize': 50,
         'maxSteps': 2000,
         'c1': 2,
         'c2': 2,
@@ -121,23 +107,17 @@ def crcbpso(fitfuncHandle, nDim, O=0, **kwargs):
         'dcLaw_c': 2000 - 1,
         'dcLaw_d': 0.2,
         'bndryCond': '',
-        'nbrhdSz': 3
+        'nbrhdSz': 2
     }
-
-    # 更新参数
     psoParams.update(kwargs)
+    run = psoParams.get('run', 1)
 
-    # 获取当前Run序号
-    run = psoParams.get('run', 1)  # 默认序号为1
-
-    # 初始化返回数据
     returnData = {
         'totalFuncEvals': 0,
         'bestLocation': cp.zeros((1, nDim)),
         'bestFitness': cp.inf,
     }
 
-    # GPU矩阵初始化
     partCoordCols = slice(0, nDim)
     partVelCols = slice(nDim, 2 * nDim)
     partPbestCols = slice(2 * nDim, 3 * nDim)
@@ -152,7 +132,6 @@ def crcbpso(fitfuncHandle, nDim, O=0, **kwargs):
     nColsPop = partFitEvalsCols + 1
     pop = cp.zeros((psoParams['popsize'], nColsPop))
 
-    # 初始化种群
     pop[:, partCoordCols] = cp.random.rand(psoParams['popsize'], nDim)
     pop[:, partVelCols] = -pop[:, partCoordCols] + cp.random.rand(psoParams['popsize'], nDim)
     pop[:, partPbestCols] = pop[:, partCoordCols]
@@ -166,45 +145,29 @@ def crcbpso(fitfuncHandle, nDim, O=0, **kwargs):
 
     gbestVal = cp.inf
     gbestLoc = cp.ones((1, nDim))
-
-    # 跟踪总评估次数
     total_evals = 0
 
-    # 带序号的进度条
-    with tqdm(
-            range(psoParams['maxSteps']),
-            desc=f'Run {run}',
-            position=0,
-            leave=True
-    ) as pbar:
+    with tqdm(range(psoParams['maxSteps']), desc=f'Run {run}', position=0, leave=True) as pbar:
         for lpc_steps in pbar:
-            # 计算适应度
             if psoParams['bndryCond']:
                 fitnessValues, pop[:, partCoordCols] = fitfuncHandle(pop[:, partCoordCols], returnxVec=1)
             else:
                 fitnessValues = fitfuncHandle(pop[:, partCoordCols], returnxVec=0)
-
-            # 确保fitnessValues是CuPy数组
             if isinstance(fitnessValues, np.ndarray):
                 fitnessValues = cp.asarray(fitnessValues)
-
-            # 更新总评估次数
             total_evals += psoParams['popsize']
 
-            # 更新当前适应度和个体最优
             pop[:, partFitCurrCols] = fitnessValues
             update_mask = pop[:, partFitPbestCols] > pop[:, partFitCurrCols]
             pop[update_mask, partFitPbestCols] = pop[update_mask, partFitCurrCols]
             pop[update_mask, partPbestCols] = pop[update_mask, partCoordCols]
 
-            # 更新全局最优
             bestFitness = cp.min(pop[:, partFitCurrCols])
             if gbestVal > bestFitness:
                 gbestVal = bestFitness
                 bestParticle = cp.argmin(pop[:, partFitCurrCols])
                 gbestLoc = pop[bestParticle, partCoordCols]
 
-            # 局部最优更新
             ringIndices = cp.arange(psoParams['popsize']).reshape(-1, 1) + cp.arange(psoParams['nbrhdSz'])
             ringIndices %= psoParams['popsize']
             minIndices = cp.argmin(pop[ringIndices, partFitCurrCols], axis=1)
@@ -213,41 +176,32 @@ def crcbpso(fitfuncHandle, nDim, O=0, **kwargs):
             pop[:, partLocalBestCols] = lbestLoc
             pop[:, partFitLbestCols] = pop[ringIndices[cp.arange(psoParams['popsize']), minIndices], partFitCurrCols]
 
-            # 速度更新
             inertiaWt = cp.maximum(psoParams['dcLaw_a'] - (psoParams['dcLaw_b'] / psoParams['dcLaw_c']) * lpc_steps,
                                    psoParams['dcLaw_d'])
             chi1 = cp.random.rand(psoParams['popsize'], nDim)
             chi2 = cp.random.rand(psoParams['popsize'], nDim)
-
             pop[:, partVelCols] = (inertiaWt * pop[:, partVelCols] +
                                    psoParams['c1'] * (pop[:, partPbestCols] - pop[:, partCoordCols]) * chi1 +
                                    psoParams['c2'] * (pop[:, partLocalBestCols] - pop[:, partCoordCols]) * chi2)
-
-            # 限制速度
             pop[:, partVelCols] = cp.clip(pop[:, partVelCols], -psoParams['max_velocity'], psoParams['max_velocity'])
-
-            # 更新位置
             pop[:, partCoordCols] += pop[:, partVelCols]
 
-            # 边界处理
             invalid = cp.any((pop[:, partCoordCols] < 0) | (pop[:, partCoordCols] > 1), axis=1)
             pop[invalid, partFitCurrCols] = cp.inf
             pop[invalid, partFlagFitEvalCols] = 0
 
-    # 准备返回数据
     returnData.update({
         'totalFuncEvals': total_evals,
         'bestLocation': cp.asnumpy(gbestLoc),
         'bestFitness': float(gbestVal.get())
     })
-
     return returnData
-
 
 def crcbgenqcsig(dataX, r, m_c, tc, phi_c, mlz, y):
     r = (10 ** r) * 1e6 * pc
     m_c = (10 ** m_c) * M_sun
     mlz = (10 ** mlz) * M_sun
+    y = (10 ** y)
 
     theta_t = c ** 3 * (tc - dataX) / (5 * G * m_c)
     theta_t = cp.where(dataX < tc, theta_t, 0)
@@ -262,7 +216,6 @@ def crcbgenqcsig(dataX, r, m_c, tc, phi_c, mlz, y):
     F_geo = cp.where(y >= 1, cp.sqrt(1 + 1 / y), F_geo)
     sigVec_f = h_f * F_geo
     return cp.fft.irfft(sigVec_f)
-
 
 def glrtqcsig4pso(xVec, params, returnxVec=0):
     if isinstance(xVec, np.ndarray):
@@ -280,13 +233,11 @@ def glrtqcsig4pso(xVec, params, returnxVec=0):
 
     return (fitVal.get(), xVec.get()) if returnxVec else fitVal.get()
 
-
 def ssrqc(x, params):
     qc = crcbgenqcsig(params['dataX'], x[0], x[1], x[2], x[3], x[4], x[5])
     qc, _ = normsig4psd(qc, params['sampFreq'], params['psdPosFreq'], 1)
     inPrd = innerprodpsd(params['dataY'], qc, params['sampFreq'], params['psdPosFreq'])
     return -cp.abs(inPrd) ** 2
-
 
 def normsig4psd(sigVec, sampFreq, psdVec, snr):
     nSamples = len(sigVec)
@@ -295,19 +246,16 @@ def normsig4psd(sigVec, sampFreq, psdVec, snr):
     normFac = snr / cp.sqrt(normSigSqrd)
     return normFac * sigVec, normFac
 
-
 def innerprodpsd(xVec, yVec, sampFreq, psdVals):
     fftX = cp.fft.fft(xVec)
     fftY = cp.fft.fft(yVec)
     psdVec4Norm = cp.concatenate([psdVals, psdVals[-2:0:-1]])
     return cp.real(cp.sum((fftX / psdVec4Norm) * cp.conj(fftY)) / (sampFreq * len(xVec)))
 
-
 def s2rv(xVec, params):
     rmax = cp.asarray(params['rmax'])
     rmin = cp.asarray(params['rmin'])
     return xVec * (rmax - rmin) + rmin
-
 
 def crcbchkstdsrchrng(xVec):
     if not isinstance(xVec, cp.ndarray):
