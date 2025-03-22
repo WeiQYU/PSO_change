@@ -2,6 +2,9 @@ import cupy as cp
 from cupyx.scipy.fftpack import fft
 from tqdm import tqdm
 import numpy as np
+import pycbc.types
+from pycbc.filter import match
+
 
 # Constants
 G = 6.67430e-11  # Gravitational constant, m^3 kg^-1 s^-2
@@ -10,15 +13,23 @@ M_sun = 1.989e30 # Solar mass, kg
 pc = 3.086e16    # Parsec to meters
 
 __all__ = [
-    'crcbqcpsopsd', 'crcbpso', 'crcbgenqcsig', 'glrtqcsig4pso',
-    'ssrqc', 'normsig4psd', 'innerprodpsd', 's2rv', 'crcbchkstdsrchrng'
+    'crcbqcpsopsd',
+    'crcbpso',
+    'crcbgenqcsig',
+    'glrtqcsig4pso',
+    'ssrqc',
+    'normsig4psd',
+    'innerprodpsd',
+    's2rv',
+    'crcbchkstdsrchrng'
 ]
 
 def crcbqcpsopsd(inParams, psoParams, nRuns):
     # Transfer data to GPU
     inParams['dataX'] = cp.asarray(inParams['dataX'])
     inParams['dataY'] = cp.asarray(inParams['dataY'])
-    inParams['psdPosFreq'] = cp.asarray(inParams['psdPosFreq'])
+    # inParams['psdPosFreq'] = cp.asarray(inParams['psdPosFreq'])
+    inParams['psdHigh'] = cp.asarray(inParams['psdHigh'])
     inParams['rmax'] = cp.asarray(inParams['rmax'])
     inParams['rmin'] = cp.asarray(inParams['rmin'])
 
@@ -36,8 +47,8 @@ def crcbqcpsopsd(inParams, psoParams, nRuns):
         'm_c': None,
         'tc': None,
         'phi_c': None,
-        'mlz': None,
-        'y': None,
+        'A': None,
+        'delta_t': None,
     }
 
     for lpruns in range(nRuns):
@@ -53,29 +64,28 @@ def crcbqcpsopsd(inParams, psoParams, nRuns):
             'm_c': 0,
             'tc': 0,
             'phi_c': 0,
-            'mlz': 0,
-            'y': 0,
+            'A': 0,
+            'delta_t': 0,
             'estSig': cp.zeros(nSamples),
             'totalFuncEvals': [],
         }
         fitVal[lpruns] = outStruct[lpruns]['bestFitness']
         _, params = fHandle(outStruct[lpruns]['bestLocation'][cp.newaxis, ...], returnxVec=1)
         params = cp.asnumpy(params[0])
-        r, m_c, tc, phi_c, mlz, y = params
+        r, m_c, tc, phi_c, A, delta_t = params
 
-        estSig = crcbgenqcsig(inParams['dataX'], r, m_c, tc, phi_c, mlz, y)
-        estSig, _ = normsig4psd(estSig, inParams['sampFreq'], inParams['psdPosFreq'], 1)
-        estAmp = innerprodpsd(inParams['dataY'], estSig, inParams['sampFreq'], inParams['psdPosFreq'])
+        estSig = crcbgenqcsig(inParams['dataX'], r, m_c, tc, phi_c, A, delta_t)
+        estSig, _ = normsig4psd(estSig, inParams['sampFreq'], inParams['psdHigh'], 1)
+        estAmp = innerprodpsd(inParams['dataY'], estSig, inParams['sampFreq'], inParams['psdHigh'])
         estSig = estAmp * estSig
-
         allRunsOutput.update({
             'fitVal': float(fitVal[lpruns].get()),
             'r': r,
             'm_c': m_c,
             'tc': tc,
             'phi_c': phi_c,
-            'mlz': mlz,
-            'y': y,
+            'A': A,
+            'delta_t': delta_t,
             'estSig': cp.asnumpy(estSig),
             'totalFuncEvals': outStruct[lpruns]['totalFuncEvals']
         })
@@ -90,8 +100,8 @@ def crcbqcpsopsd(inParams, psoParams, nRuns):
         'm_c': outResults['allRunsOutput'][bestRun]['m_c'],
         'tc': outResults['allRunsOutput'][bestRun]['tc'],
         'phi_c': outResults['allRunsOutput'][bestRun]['phi_c'],
-        'mlz': outResults['allRunsOutput'][bestRun]['mlz'],
-        'y': outResults['allRunsOutput'][bestRun]['y'],
+        'A': outResults['allRunsOutput'][bestRun]['A'],
+        'delta_t': outResults['allRunsOutput'][bestRun]['delta_t'],
     })
     return outResults, outStruct
 
@@ -107,7 +117,7 @@ def crcbpso(fitfuncHandle, nDim, **kwargs):
         'dcLaw_c': 2000 - 1,
         'dcLaw_d': 0.2,
         'bndryCond': '',
-        'nbrhdSz': 2
+        'nbrhdSz': 4
     }
     psoParams.update(kwargs)
     run = psoParams.get('run', 1)
@@ -133,7 +143,7 @@ def crcbpso(fitfuncHandle, nDim, **kwargs):
     pop = cp.zeros((psoParams['popsize'], nColsPop))
 
     pop[:, partCoordCols] = cp.random.rand(psoParams['popsize'], nDim)
-    pop[:, partVelCols] = -pop[:, partCoordCols] + cp.random.rand(psoParams['popsize'], nDim)
+    pop[:, partVelCols] = -pop[:, partCoordCols] + cp.random.rand(psoParams['popsize'] + 516, nDim)
     pop[:, partPbestCols] = pop[:, partCoordCols]
     pop[:, partFitPbestCols] = cp.inf
     pop[:, partFitCurrCols] = 0
@@ -197,25 +207,46 @@ def crcbpso(fitfuncHandle, nDim, **kwargs):
     })
     return returnData
 
-def crcbgenqcsig(dataX, r, m_c, tc, phi_c, mlz, y):
+
+def crcbgenqcsig(dataX, r, m_c, tc, phi_c, A, delta_t):
     r = (10 ** r) * 1e6 * pc
     m_c = (10 ** m_c) * M_sun
-    mlz = (10 ** mlz) * M_sun
-    y = (10 ** y)
+    delta_t = (10 ** delta_t)
 
-    theta_t = c ** 3 * (tc - dataX) / (5 * G * m_c)
-    theta_t = cp.where(dataX < tc, theta_t, 0)
-    h = G * m_c / (c ** 2 * r) * theta_t ** (-1 / 4) * cp.cos(2 * phi_c - 2 * theta_t ** (5 / 8))
-    h = cp.where(dataX >= tc, 0, h)
+    def generate_h_t(t_array, M_c, r, phi_c, t_c):
+        # Vectorized computation using CuPy
+        mask = t_array < t_c
+        theta_t = cp.zeros_like(t_array)
+        theta_t[mask] = c ** 3 * (t_c - t_array[mask]) / (5 * G * M_c)
+        h = cp.zeros_like(t_array)
+        h[mask] = G * M_c / (c ** 2 * r) * theta_t[mask] ** (-1 / 4) * cp.cos(2 * phi_c - 2 * theta_t[mask] ** (5 / 8))
+        return h
 
+    # Convert input array to CuPy
+    dataX_gpu = cp.asarray(dataX)
+
+    # Generate signal
+    h = generate_h_t(dataX_gpu, m_c, r, phi_c, tc)
+
+    # Convert to frequency domain
     h_f = cp.fft.rfft(h)
-    freqs = cp.fft.rfftfreq(len(dataX), d=cp.diff(dataX)[0])
-    omega = 2 * cp.pi * freqs
-    w = G * 4 * mlz * omega / c ** 3
-    F_geo = cp.sqrt(1 + 1 / y) - 1j * cp.sqrt(-1 + 1 / y) * cp.exp(1j * w * 2 * y)
-    F_geo = cp.where(y >= 1, cp.sqrt(1 + 1 / y), F_geo)
-    sigVec_f = h_f * F_geo
-    return cp.fft.irfft(sigVec_f)
+    freqs = cp.fft.rfftfreq(len(h), dataX_gpu[1] - dataX_gpu[0])
+
+    # Apply low frequency cutoff
+    low_freq_cutoff = 3.0
+    freq_mask = freqs >= low_freq_cutoff
+    h_f = cp.where(freq_mask, h_f, 0)
+
+    def parametric_lens_model(h_f, freqs, A, dt):
+        phi = 2 * cp.pi * freqs * dt
+        F_f = 1 + A * cp.exp(1j * phi)
+        return h_f * F_f
+
+    # Apply lensing effect
+    h_lens_f = parametric_lens_model(h_f, freqs, A, delta_t)
+
+    # Convert back to time domain
+    return cp.fft.irfft(h_lens_f)
 
 def glrtqcsig4pso(xVec, params, returnxVec=0):
     if isinstance(xVec, np.ndarray):
@@ -235,8 +266,8 @@ def glrtqcsig4pso(xVec, params, returnxVec=0):
 
 def ssrqc(x, params):
     qc = crcbgenqcsig(params['dataX'], x[0], x[1], x[2], x[3], x[4], x[5])
-    qc, _ = normsig4psd(qc, params['sampFreq'], params['psdPosFreq'], 1)
-    inPrd = innerprodpsd(params['dataY'], qc, params['sampFreq'], params['psdPosFreq'])
+    qc, _ = normsig4psd(qc, params['sampFreq'], params['psdHigh'], 1)
+    inPrd = innerprodpsd(params['dataY'], qc, params['sampFreq'], params['psdHigh'])
     return -cp.abs(inPrd) ** 2
 
 def normsig4psd(sigVec, sampFreq, psdVec, snr):
@@ -261,3 +292,6 @@ def crcbchkstdsrchrng(xVec):
     if not isinstance(xVec, cp.ndarray):
         xVec = cp.asarray(xVec)
     return cp.all((xVec >= 0) & (xVec <= 1), axis=1)
+
+
+
