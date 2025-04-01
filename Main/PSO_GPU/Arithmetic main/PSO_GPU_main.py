@@ -4,11 +4,11 @@ from tqdm import tqdm
 import numpy as np
 import pycbc.types
 from pycbc.filter import match
+import scipy.constants as const
 
-cp.random.seed(5511)
 # Constants
-G = 6.67430e-11  # Gravitational constant, m^3 kg^-1 s^-2
-c = 2.998e8      # Speed of light, m/s
+G = const.G  # Gravitational constant, m^3 kg^-1 s^-2
+c = const.c     # Speed of light, m/s
 M_sun = 1.989e30 # Solar mass, kg
 pc = 3.086e16    # Parsec to meters
 
@@ -23,6 +23,7 @@ __all__ = [
     's2rv',
     'crcbchkstdsrchrng'
 ]
+
 
 def crcbqcpsopsd(inParams, psoParams, nRuns):
     # Transfer data to GPU
@@ -70,8 +71,24 @@ def crcbqcpsopsd(inParams, psoParams, nRuns):
             'totalFuncEvals': [],
         }
         fitVal[lpruns] = outStruct[lpruns]['bestFitness']
-        _, params = fHandle(outStruct[lpruns]['bestLocation'][cp.newaxis, ...], returnxVec=1)
-        params = cp.asnumpy(params[0])
+
+        # Fix for dimension handling
+        bestLocation = cp.asarray(outStruct[lpruns]['bestLocation'])
+        if bestLocation.ndim == 1:
+            bestLocation = bestLocation.reshape(1, -1)  # Ensure 2D shape (1, nDim)
+
+        _, params = fHandle(bestLocation, returnxVec=1)
+
+        # Handle params dimensionality
+        if isinstance(params, list) and len(params) > 0:
+            params = params[0]
+        elif params.ndim > 1 and params.shape[0] == 1:
+            params = params[0]
+
+        # Convert to numpy if needed
+        if isinstance(params, cp.ndarray):
+            params = cp.asnumpy(params)
+
         r, m_c, tc, phi_c, A, delta_t = params
 
         estSig = crcbgenqcsig(inParams['dataX'], r, m_c, tc, phi_c, A, delta_t)
@@ -79,7 +96,7 @@ def crcbqcpsopsd(inParams, psoParams, nRuns):
         estAmp = innerprodpsd(inParams['dataY'], estSig, inParams['sampFreq'], inParams['psdHigh'])
         estSig = estAmp * estSig
         allRunsOutput.update({
-            'fitVal': float(fitVal[lpruns].get()),
+            'fitVal': float(fitVal[lpruns].get()) if hasattr(fitVal[lpruns], 'get') else float(fitVal[lpruns]),
             'r': r,
             'm_c': m_c,
             'tc': tc,
@@ -91,7 +108,13 @@ def crcbqcpsopsd(inParams, psoParams, nRuns):
         })
         outResults['allRunsOutput'].append(allRunsOutput)
 
-    bestRun = cp.argmin(fitVal).get()
+    # Convert to numpy for comparison if needed
+    if hasattr(fitVal, 'get'):
+        fitVal_np = cp.asnumpy(fitVal)
+    else:
+        fitVal_np = fitVal
+
+    bestRun = np.argmin(fitVal_np)
     outResults.update({
         'bestRun': int(bestRun),
         'bestFitness': outResults['allRunsOutput'][bestRun]['fitVal'],
@@ -105,13 +128,14 @@ def crcbqcpsopsd(inParams, psoParams, nRuns):
     })
     return outResults, outStruct
 
+
 def crcbpso(fitfuncHandle, nDim, **kwargs):
     psoParams = {
-        'popsize': 220,
+        'popsize': 200,
         'maxSteps': 2000,
-        'c1': 1.729606984651714,
-        'c2': 1.3457415961968024,
-        'max_velocity': 0.5445020314499609,
+        'c1': 2,
+        'c2': 2,
+        'max_velocity': 0.5,
         'dcLaw_a': 0.9,
         'dcLaw_b': 0.4,
         'dcLaw_c': 2000 - 1,
@@ -200,10 +224,13 @@ def crcbpso(fitfuncHandle, nDim, **kwargs):
             pop[invalid, partFitCurrCols] = cp.inf
             pop[invalid, partFlagFitEvalCols] = 0
 
+    # Fix for the error: Handle both CuPy array and float types
+    best_fitness = float(gbestVal) if isinstance(gbestVal, (int, float)) else float(gbestVal.get())
+
     returnData.update({
         'totalFuncEvals': total_evals,
         'bestLocation': cp.asnumpy(gbestLoc),
-        'bestFitness': float(gbestVal.get())
+        'bestFitness': best_fitness
     })
     return returnData
 
@@ -211,31 +238,34 @@ def crcbpso(fitfuncHandle, nDim, **kwargs):
 def crcbgenqcsig(dataX, r, m_c, tc, phi_c, A, delta_t):
     r = (10 ** r) * 1e6 * pc
     m_c = (10 ** m_c) * M_sun
-    delta_t = (10 ** delta_t)
+    # delta_t = 10 ** delta_t
 
-    def generate_h_t(t_array, M_c, r, phi_c, t_c):
-        # Vectorized computation using CuPy
-        mask = t_array < t_c
-        theta_t = cp.zeros_like(t_array)
-        theta_t[mask] = c ** 3 * (t_c - t_array[mask]) / (5 * G * M_c)
-        h = cp.zeros_like(t_array)
-        h[mask] = G * M_c / (c ** 2 * r) * theta_t[mask] ** (-1 / 4) * cp.cos(2 * phi_c - 2 * theta_t[mask] ** (5 / 8))
+    def generate_gw_signal(t):
+        # 确保在合并前截止
+        valid_idx = t < tc
+        t_valid = t[valid_idx]
+        # 计算Θ(t)，控制信号的频率演化
+        Theta = c ** 3 * (tc - t_valid) / (5 * G * m_c)
+        # 计算振幅部分
+        A = (G * m_c / (c ** 2 * r)) * Theta ** (-1 / 4)
+
+        # 原始相位计算
+        phase = 2 * phi_c - 2 * Theta ** (5 / 8)
+
+        # 计算波形
+        h = np.zeros_like(t)
+        h[valid_idx] = A * np.cos(phase)
         return h
 
     # Convert input array to CuPy
     dataX_gpu = cp.asarray(dataX)
 
     # Generate signal
-    h = generate_h_t(dataX_gpu, m_c, r, phi_c, tc)
+    h = generate_gw_signal(dataX_gpu)
 
     # Convert to frequency domain
     h_f = cp.fft.rfft(h)
     freqs = cp.fft.rfftfreq(len(h), dataX_gpu[1] - dataX_gpu[0])
-
-    # Apply low frequency cutoff
-    low_freq_cutoff = 3.0
-    freq_mask = freqs >= low_freq_cutoff
-    h_f = cp.where(freq_mask, h_f, 0)
 
     def parametric_lens_model(h_f, freqs, A, dt):
         phi = 2 * cp.pi * freqs * dt
@@ -244,23 +274,41 @@ def crcbgenqcsig(dataX, r, m_c, tc, phi_c, A, delta_t):
 
     # Apply lensing effect
     h_lens_f = parametric_lens_model(h_f, freqs, A, delta_t)
-
+    # print(f'r:{r / 1e6 / pc},m_c:{m_c / M_sun},tc:{tc},phi_c:{phi_c},A:{A},delta_t:{delta_t}') # 参数的估计正确
+    # print(f'signal:{cp.fft.irfft(h_lens_f)}')  # 信号正确
     # Convert back to time domain
     return cp.fft.irfft(h_lens_f)
+
 
 def glrtqcsig4pso(xVec, params, returnxVec=0):
     if isinstance(xVec, np.ndarray):
         xVec = cp.asarray(xVec)
-    validPts = crcbchkstdsrchrng(xVec)
-    xVec_valid = xVec[validPts]
-    xVec[validPts] = s2rv(xVec_valid, params)
 
-    fitVal = cp.full(xVec.shape[0], cp.inf)
-    validIndices = cp.where(validPts)[0]
+    # Fix for the IndexError
+    # The error happens because validPts shape doesn't match xVec properly
+    # We need to handle the dimensionality correctly
 
-    for idx in validIndices.get().tolist():
-        x = xVec[idx]
-        fitVal[idx] = ssrqc(x, params)
+    # Check dimensions and reshape if needed
+    if xVec.ndim == 2:
+        # When processing a batch of vectors
+        validPts = crcbchkstdsrchrng(xVec)
+        fitVal = cp.full(xVec.shape[0], cp.inf)
+
+        # Process each valid point individually
+        for i in range(xVec.shape[0]):
+            if validPts[i]:
+                # Apply s2rv to valid points
+                xVec[i] = s2rv(xVec[i:i + 1], params)[0]
+                # Calculate fitness
+                fitVal[i] = ssrqc(xVec[i], params)
+    else:
+        # Single vector case (should not normally happen but added for completeness)
+        validPts = crcbchkstdsrchrng(xVec.reshape(1, -1))[0]
+        fitVal = cp.inf
+
+        if validPts:
+            xVec = s2rv(xVec.reshape(1, -1), params)[0]
+            fitVal = ssrqc(xVec, params)
 
     return (fitVal.get(), xVec.get()) if returnxVec else fitVal.get()
 
@@ -272,6 +320,7 @@ def ssrqc(x, params):
 
 def normsig4psd(sigVec, sampFreq, psdVec, snr):
     nSamples = len(sigVec)
+    # print(f'psdVec:{psdVec}')
     psdVec4Norm = cp.concatenate([psdVec, psdVec[-2:0:-1]])
     normSigSqrd = cp.sum((cp.fft.fft(sigVec) / psdVec4Norm) * cp.conj(cp.fft.fft(sigVec))) / (sampFreq * nSamples)
     normFac = snr / cp.sqrt(normSigSqrd)
@@ -281,81 +330,21 @@ def innerprodpsd(xVec, yVec, sampFreq, psdVals):
     fftX = cp.fft.fft(xVec)
     fftY = cp.fft.fft(yVec)
     psdVec4Norm = cp.concatenate([psdVals, psdVals[-2:0:-1]])
+    # print(cp.isnan(fftX),cp.isnan(fftY),cp.isnan(psdVec4Norm),cp.isinf(fftX),cp.isinf(fftY),cp.isinf(psdVec4Norm))
     return cp.real(cp.sum((fftX / psdVec4Norm) * cp.conj(fftY)) / (sampFreq * len(xVec)))
 
-# def s2rv(xVec, params):
-#     rmax = cp.asarray(params['rmax'])
-#     rmin = cp.asarray(params['rmin'])
-#     return xVec * (rmax - rmin) + rmin
 def s2rv(xVec, params):
-    """综合改进版参数映射函数"""
-    if not isinstance(xVec, cp.ndarray):
-        xVec = cp.asarray(xVec)
-
     rmax = cp.asarray(params['rmax'])
     rmin = cp.asarray(params['rmin'])
+    return xVec * (rmax - rmin) + rmin
 
-    # 基本映射
-    transformed = xVec * (rmax - rmin) + rmin
-
-    # 1. 参数耦合 - r和m_c关联
-    r_idx, mc_idx, phi_idx = 0, 1, 3
-    r_val = transformed[:, r_idx]
-    r_norm = (r_val - rmin[r_idx]) / (rmax[r_idx] - rmin[r_idx])
-    mc_adjustment = 0.1 * r_norm
-    transformed[:, mc_idx] = transformed[:, mc_idx] * (1 - mc_adjustment)
-
-    # 2. 物理约束 - 极端值检查与调整
-    mc_val = transformed[:, mc_idx]
-    amplitude_factor = cp.power(10 ** mc_val, 5 / 3) / (10 ** r_val)
-    target_amplitude = (13.4881 ** (5 / 3)) / 100.0
-    ratio = amplitude_factor / target_amplitude
-
-    # 对极端异常值进行修正
-    extreme_mask = (ratio > 1000) | (ratio < 0.001)
-    if cp.any(extreme_mask):
-        # 调整方向取决于比值是过大还是过小
-        high_ratio_mask = (ratio > 1000) & extreme_mask
-        low_ratio_mask = (ratio < 0.001) & extreme_mask
-
-        # 因子过大时减小m_c值
-        if cp.any(high_ratio_mask):
-            transformed[high_ratio_mask, mc_idx] *= 0.95
-
-        # 因子过小时增加m_c值
-        if cp.any(low_ratio_mask):
-            transformed[low_ratio_mask, mc_idx] *= 1.05
-
-    # 3. 相位处理改进
-    # 规范化相位到[0, 2π]范围
-    transformed[:, phi_idx] = transformed[:, phi_idx] % (2 * cp.pi)
-
-    # 相位参数轻微偏向目标值
-    target_phi = cp.pi  # 目标相位值为π
-    phi_values = transformed[:, phi_idx]
-
-    # 计算周期性距离
-    dist_to_target = cp.minimum(
-        cp.abs(phi_values - target_phi),
-        cp.minimum(
-            cp.abs(phi_values - target_phi - 2 * cp.pi),
-            cp.abs(phi_values - target_phi + 2 * cp.pi)
-        )
-    )
-
-    # 仅对相位偏差很大的点进行轻微调整
-    far_mask = dist_to_target > cp.pi / 2
-    if cp.any(far_mask):
-        adjustment = 0.05 * (target_phi - phi_values[far_mask])
-        transformed[far_mask, phi_idx] += adjustment
-        transformed[:, phi_idx] = transformed[:, phi_idx] % (2 * cp.pi)
-
-    return transformed
 
 def crcbchkstdsrchrng(xVec):
     if not isinstance(xVec, cp.ndarray):
         xVec = cp.asarray(xVec)
-    return cp.all((xVec >= 0) & (xVec <= 1), axis=1)
 
+    # Ensure we're checking if all elements in each row are valid
+    # This will return a 1D array with one boolean per row in xVec
+    return cp.all((xVec >= 0) & (xVec <= 1), axis=1)
 
 
