@@ -346,5 +346,3 @@ def crcbchkstdsrchrng(xVec):
     # Ensure we're checking if all elements in each row are valid
     # This will return a 1D array with one boolean per row in xVec
     return cp.all((xVec >= 0) & (xVec <= 1), axis=1)
-
-
