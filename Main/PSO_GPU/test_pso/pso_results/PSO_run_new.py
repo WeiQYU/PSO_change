@@ -1,17 +1,12 @@
 import cupy as cp
 import scipy.io as scio
-from scipy.signal import welch, filtfilt
-from scipy.interpolate import interp1d
+from scipy.signal import welch
 from PSO_main_new import *
 import matplotlib.pyplot as plt
 import numpy as np
 import scipy.constants as const
-import csv
-import os
 import pandas as pd
-import time
-from pycbc.filter import matched_filter
-from pycbc.types import TimeSeries, FrequencySeries
+
 
 # Constants
 G = const.G  # Gravitational constant, m^3 kg^-1 s^-2
@@ -87,7 +82,7 @@ inParams = {
 }
 
 # Number of PSO runs
-nRuns = 8
+nRuns = 4
 
 # 修改后的PSO参数
 pso_config = {
@@ -98,7 +93,7 @@ pso_config = {
     'w_start': 0.9,  # 初始惯性权重
     'w_end': 0.4,  # 最终惯性权重
     'max_velocity': 0.5,  # 限制最大速度
-    'nbrhdSz': 3  # 邻域大小
+    'nbrhdSz': 5  # 邻域大小
 }
 
 print("Running PSO optimization...")
@@ -112,7 +107,7 @@ for lpruns in range(nRuns):
     if 'fitnessHistory' in outStruct[lpruns]:
         plt.plot(outStruct[lpruns]['fitnessHistory'], label=f'Run {lpruns + 1}')
 plt.xlabel('Iteration')
-plt.ylabel('Fitness Value (Negative of SNR)')
+plt.ylabel('Fitness Value (SNR)')
 plt.title('PSO Fitness History Across Iterations')
 plt.legend()
 plt.grid(True)
@@ -259,7 +254,7 @@ for lpruns in range(nRuns):
     run_sig = cp.real(outResults['allRunsOutput'][lpruns]['estSig'])
 
     # 计算SNR
-    run_snr_optimal = -outStruct[lpruns]['bestFitness']  # 基于优化的SNR
+    run_snr_optimal = outStruct[lpruns]['bestFitness']  # 基于优化的SNR
     run_snr_pycbc = calculate_snr_pycbc(run_sig, psdHigh, Fs)  # PyCBC方法的SNR
 
     run_mass = 10 ** outResults['allRunsOutput'][lpruns]['m_c'] * M_sun
