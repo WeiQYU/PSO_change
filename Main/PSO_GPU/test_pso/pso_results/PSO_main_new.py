@@ -1,12 +1,12 @@
 import cupy as cp
 from cupyx.scipy.fftpack import fft
-from lalburst.power import psds_from_job_length
+from pycbc.types import FrequencySeries, TimeSeries
 from tqdm import tqdm
 import numpy as np
+import pycbc.types
+from pycbc.filter import match
 import scipy.constants as const
 import time
-from pycbc.filter import matched_filter
-from pycbc.types import TimeSeries, FrequencySeries
 
 # Constants
 G = const.G  # Gravitational constant, m^3 kg^-1 s^-2
@@ -19,12 +19,12 @@ __all__ = [
     'crcbpso',
     'crcbgenqcsig',
     'glrtqcsig4pso',
-    'calculate_snr_pycbc',
+    'ssrqc',
     'normsig4psd',
     'innerprodpsd',
     's2rv',
     'crcbchkstdsrchrng',
-    'classify_signal',
+    'calculate_snr_pycbc',
     'analyze_mismatch',
     'classify_signal'
 ]
@@ -108,10 +108,8 @@ def crcbqcpsopsd(inParams, psoParams, nRuns):
 
         # 生成最佳信号
         estSig = crcbgenqcsig(inParams['dataX'], r, m_c, tc, phi_c, A, delta_t)
-
-        # 对信号进行归一化处理
-        estSig, _ = normsig4psd(estSig, inParams['sampFreq'], inParams['psdHigh'], 1)
-        estAmp = innerprodpsd(inParams['dataY'], estSig, inParams['sampFreq'], inParams['psdHigh'])
+        estSig, _ = normsig4psd(estSig, inParams['sampFreq'], inParams['psdHigh'], 1)  # 计划删除进行检查
+        estAmp = innerprodpsd(inParams['dataY'], estSig, inParams['sampFreq'], inParams['psdHigh'])  # 计划删除进行检查
         estSig = estAmp * estSig
 
         # 更新输出结果
@@ -134,7 +132,7 @@ def crcbqcpsopsd(inParams, psoParams, nRuns):
     else:
         fitVal_np = fitVal
 
-    bestRun = np.argmax(fitVal_np)
+    bestRun = np.argmin(fitVal_np)
     outResults.update({
         'bestRun': int(bestRun),
         'bestFitness': outResults['allRunsOutput'][bestRun]['fitVal'],
@@ -151,9 +149,9 @@ def crcbqcpsopsd(inParams, psoParams, nRuns):
 
 def crcbpso(fitfuncHandle, nDim, **kwargs):
     """
-    完全重写的PSO核心算法实现
+    完全重写的PSO核心算法实现，增加了早期停止功能
     """
-    # 默认PSO参数
+    # 默认PSO参数，实则无意义
     psoParams = {
         'popsize': 200,
         'maxSteps': 2000,
@@ -176,7 +174,7 @@ def crcbpso(fitfuncHandle, nDim, **kwargs):
     returnData = {
         'totalFuncEvals': 0,
         'bestLocation': cp.zeros((1, nDim)),
-        'bestFitness': -cp.inf,  # 初始化为负无穷，因为我们要最大化SNR
+        'bestFitness': cp.inf,
         'fitnessHistory': []  # 记录历史适应度
     }
 
@@ -194,7 +192,7 @@ def crcbpso(fitfuncHandle, nDim, **kwargs):
     pbest_fitness = fitness.copy()
 
     # 找出全局最佳
-    gbest_idx = cp.argmax(pbest_fitness)  # 使用argmax因为我们要最大化SNR
+    gbest_idx = cp.argmin(pbest_fitness)
     gbest = pbest[gbest_idx].copy()
     gbest_fitness = pbest_fitness[gbest_idx].copy()
 
@@ -202,6 +200,11 @@ def crcbpso(fitfuncHandle, nDim, **kwargs):
     returnData['fitnessHistory'].append(float(gbest_fitness))
 
     total_evals = psoParams['popsize']  # 计数器：已评估的适应度次数
+
+    # # 早期停止变量初始化
+    no_improvement_count = 0
+    prev_best_fitness = float(gbest_fitness)
+    max_no_improvement = psoParams['maxSteps'] // 2 # 连续超过一半总迭代次数但迭代无改进则停止
 
     # 创建进度条
     with tqdm(range(psoParams['maxSteps']), desc=f'Run {psoParams["run"]}', position=0) as pbar:
@@ -217,9 +220,9 @@ def crcbpso(fitfuncHandle, nDim, **kwargs):
                     idx = (i + j) % psoParams['popsize']
                     neighbors.append(idx)
 
-                # 使用numpy的argmax而不是cupy的argmax，因为neighbors是Python列表
+                # 使用numpy的argmin而不是cupy的argmin，因为neighbors是Python列表
                 neighbor_fitness = [float(pbest_fitness[n]) for n in neighbors]
-                best_neighbor_idx = np.argmax(neighbor_fitness)  # 使用argmax因为我们要最大化SNR
+                best_neighbor_idx = np.argmin(neighbor_fitness)
                 lbest_idx = neighbors[best_neighbor_idx]
                 lbest = pbest[lbest_idx].copy()
 
@@ -257,14 +260,14 @@ def crcbpso(fitfuncHandle, nDim, **kwargs):
                 fitness[i] = new_fitness
                 total_evals += 1
 
-                # 更新个体最佳 - 最大化SNR
-                if new_fitness > pbest_fitness[i]:
+                # 更新个体最佳
+                if new_fitness < pbest_fitness[i]:
                     pbest[i] = particles[i].copy()
                     pbest_fitness[i] = new_fitness
 
-            # 更新全局最佳 - 最大化SNR
-            current_best_idx = cp.argmax(pbest_fitness)
-            if pbest_fitness[current_best_idx] > gbest_fitness:
+            # 更新全局最佳
+            current_best_idx = cp.argmin(pbest_fitness)
+            if pbest_fitness[current_best_idx] < gbest_fitness:
                 gbest = pbest[current_best_idx].copy()
                 gbest_fitness = pbest_fitness[current_best_idx].copy()
 
@@ -273,6 +276,20 @@ def crcbpso(fitfuncHandle, nDim, **kwargs):
 
             # 记录每一步的最佳适应度
             returnData['fitnessHistory'].append(float(gbest_fitness))
+
+            # # 检查早期停止条件
+            current_best_fitness = float(gbest_fitness)
+            if abs(current_best_fitness - prev_best_fitness) < 1e-10:  # 考虑浮点误差
+                no_improvement_count += 1
+            else:
+                no_improvement_count = 0
+                prev_best_fitness = current_best_fitness
+            
+            # 如果连续半数迭代的迭代结果无改进，则提前终止
+            if no_improvement_count >= max_no_improvement:
+                print(
+                    f"Run {psoParams['run']} stopped early after {step + 1} iterations: No improvement for {max_no_improvement} iterations")
+                break
 
     # 完成后更新返回数据
     returnData.update({
@@ -283,15 +300,71 @@ def crcbpso(fitfuncHandle, nDim, **kwargs):
 
     return returnData
 
+# 时域上生成波形和透镜
+# def crcbgenqcsig(dataX, r, m_c, tc, phi_c, A, delta_t):
+#     """
+#     生成引力波信号，包括时域中的引力透镜效应
+#     """
+#     # 转换参数单位
+#     r = (10 ** r) * 1e6 * pc  # 距离（米）
+#     m_c = (10 ** m_c) * M_sun  # 组合质量（kg）
+#     delta_t = 10 ** delta_t  # 时间延迟（秒）
+#
+#     # 确保输入是CuPy数组
+#     if not isinstance(dataX, cp.ndarray):
+#         dataX_gpu = cp.asarray(dataX)
+#     else:
+#         dataX_gpu = dataX
+#
+#     # 生成引力波信号
+#     t = dataX_gpu  # 时间序列
+#
+#     # 在合并前的有效区域计算信号
+#     valid_idx = t < tc
+#     t_valid = t[valid_idx]
+#
+#     # 初始化波形
+#     h = cp.zeros_like(t)
+#
+#     if cp.sum(valid_idx) > 0:  # 确保有有效区域
+#         # 计算频率演化参数 Theta
+#         Theta = c ** 3 * (tc - t_valid) / (5 * G * m_c)
+#
+#         # 计算振幅
+#         A_gw = (G * m_c / (c ** 2 * r)) * Theta ** (-1 / 4)
+#
+#         # 计算相位
+#         phase = 2 * phi_c - 2 * Theta ** (5 / 8)
+#
+#         # 生成波形
+#         h[valid_idx] = A_gw * cp.cos(phase)
+#
+#     # 时域中应用引力透镜效应
+#     # 1. 创建延迟信号
+#     h_delayed = cp.zeros_like(h)
+#
+#     # 计算延迟对应的样本数
+#     dt = t[1] - t[0]  # 采样间隔
+#     delay_samples = int(delta_t / dt)
+#
+#     # 如果延迟小于信号长度，则移动信号
+#     if delay_samples < len(h):
+#         h_delayed[delay_samples:] = h[:-delay_samples] if delay_samples > 0 else h
+#
+#     # 2. 应用透镜效应公式: h_lens(t) = h(t) + A * h(t - delta_t)
+#     h_lens = h + A * h_delayed
+#
+#     return h_lens
 
+# 频域上生成波形和透镜
 def crcbgenqcsig(dataX, r, m_c, tc, phi_c, A, delta_t):
     """
-    生成引力波信号，包括引力透镜效应
+    生成引力波信号，并在频域中应用引力透镜效应
     """
     # 转换参数单位
     r = (10 ** r) * 1e6 * pc  # 距离（米）
     m_c = (10 ** m_c) * M_sun  # 组合质量（kg）
-    delta_t = 10 ** delta_t  # 时间延迟（秒）
+    # delta_t = 10 ** delta_t  # 时间延迟（秒）
 
     # 确保输入是CuPy数组
     if not isinstance(dataX, cp.ndarray):
@@ -322,24 +395,35 @@ def crcbgenqcsig(dataX, r, m_c, tc, phi_c, A, delta_t):
         # 生成波形
         h[valid_idx] = A_gw * cp.cos(phase)
 
-    # 转换到频域应用引力透镜效应
-    h_f = cp.fft.rfft(h)
-    freqs = cp.fft.rfftfreq(len(h), t[1] - t[0])
+    # 在频域中应用引力透镜效应
 
-    # 应用引力透镜效应
-    phi = 2 * cp.pi * freqs * delta_t
-    F_f = 1 + A * cp.exp(1j * phi)
-    h_lens_f = h_f * F_f
+    # 1. 计算信号的FFT
+    n = len(h)
+    h_fft = cp.fft.fft(h)
 
-    # 转回时域
-    h_lens = cp.fft.irfft(h_lens_f)
+    # 2. 计算频率数组
+    dt = t[1] - t[0]  # 采样间隔
+    fs = 1 / dt  # 采样频率
+    freqs = cp.fft.fftfreq(n, dt)
+
+    # 3. 计算透镜传递函数 F(f) = 1 + A * exp(i * Phi)
+    # 其中 Phi = 2πf * delta_t
+    Phi = 2 * cp.pi * freqs * delta_t
+    lens_transfer = 1 + A * cp.exp(1j * Phi)
+
+    # 4. 在频域中应用透镜效应
+    h_lensed_fft = h_fft * lens_transfer
+
+    # 5. 转换回时域
+    h_lens = cp.real(cp.fft.ifft(h_lensed_fft))
+
+    h_lens[t > tc ] = 0
 
     return h_lens
 
-
 def glrtqcsig4pso(xVec, params, returnxVec=0):
     """
-    改进的适应度函数计算，使用PyCBC的SNR计算方法
+    改进的适应度函数计算
     """
     # 确保输入是CuPy数组
     if isinstance(xVec, np.ndarray):
@@ -354,7 +438,7 @@ def glrtqcsig4pso(xVec, params, returnxVec=0):
     nPoints = xVec.shape[0]
 
     # 初始化适应度数组
-    fitVal = cp.full(nPoints, -cp.inf)  # 使用负无穷作为默认值，因为我们要最大化SNR
+    fitVal = cp.full(nPoints, cp.inf)
 
     # 将标准范围[0,1]转换为实际参数范围
     xVecReal = s2rv(xVec, params)
@@ -362,18 +446,7 @@ def glrtqcsig4pso(xVec, params, returnxVec=0):
     # 计算每个有效点的适应度
     for i in range(nPoints):
         if validPts[i]:
-            # 生成信号
-            qc = crcbgenqcsig(params['dataX'], xVecReal[i, 0], xVecReal[i, 1],
-                              xVecReal[i, 2], xVecReal[i, 3], xVecReal[i, 4], xVecReal[i, 5])
-
-            # 对信号进行归一化
-            qc, _ = normsig4psd(qc, params['sampFreq'], params['psdHigh'], 1)
-
-            # 计算内积
-            inPrd = innerprodpsd(params['dataY'], qc, params['sampFreq'], params['psdHigh'])
-
-            # 适应度采用内积的平方（与原始代码保持一致）
-            fitVal[i] = cp.abs(inPrd) ** 2
+            fitVal[i] = ssrqc(xVecReal[i], params)
 
     if returnxVec:
         return fitVal, xVecReal
@@ -381,44 +454,105 @@ def glrtqcsig4pso(xVec, params, returnxVec=0):
         return fitVal
 
 
+def ssrqc(x, params):
+    """
+    计算信号的自匹配最佳信噪比
+    """
+    # 生成信号
+    qc = crcbgenqcsig(params['dataX'], x[0], x[1], x[2], x[3], x[4], x[5])
+
+    # 归一化信号
+    qc, _ = normsig4psd(qc, params['sampFreq'], params['psdHigh'], 1)
+
+    # 计算内积（投影）
+    inPrd = innerprodpsd(params['dataY'], qc, params['sampFreq'], params['psdHigh'])
+    # inPrd = calculate_snr_pycbc(qc,params['psdHigh'],params['sampFreq'])
+    # 返回负的平方内积（最小化问题）
+    return -cp.abs(inPrd) ** 2
+    # return inPrd
+
+
 def normsig4psd(sigVec, sampFreq, psdVec, snr):
     """
-    基于PSD对信号进行归一化
-
-    参数:
-    sigVec -- 输入信号
-    sampFreq -- 采样频率
-    psdVec -- 功率谱密度值
-    snr -- 目标信噪比
-
-    返回:
-    normalized_signal -- 归一化后的信号
-    norm_factor -- 归一化因子
+    根据PSD归一化信号
     """
     nSamples = len(sigVec)
-    psdVec4Norm = cp.concatenate([psdVec, psdVec[-2:0:-1]])
-    normSigSqrd = cp.sum((cp.fft.fft(sigVec) / psdVec4Norm) * cp.conj(cp.fft.fft(sigVec))) / (sampFreq * nSamples)
-    normFac = snr / cp.sqrt(normSigSqrd)
+
+    # # 确保PSD向量长度正确
+    # if len(psdVec) != nSamples // 2 + 1:
+    #     # 调整PSD向量长度
+    #     psdVec_adjusted = cp.zeros(nSamples // 2 + 1)
+    #     min_len = min(len(psdVec), nSamples // 2 + 1)
+    #     psdVec_adjusted[:min_len] = psdVec[:min_len]
+    #     psdVec = psdVec_adjusted
+
+    # 构建完整的PSD向量（正负频率）
+    if psdVec.shape[0] > 1:  # 确保有多于一个元素
+        psdVec4Norm = cp.concatenate([psdVec, psdVec[-2:0:-1]])
+    else:
+        # 处理特殊情况
+        psdVec4Norm = cp.zeros(nSamples)
+        psdVec4Norm[0] = psdVec[0]
+
+    # # 避免除以零
+    # psdVec4Norm = cp.maximum(psdVec4Norm, 1e-47)
+
+    # 计算信号的归一化因子
+    fft_sig = cp.fft.fft(sigVec)
+
+    # 计算归一化平方和
+    normSigSqrd = cp.sum((cp.abs(fft_sig) ** 2) / psdVec4Norm) / (sampFreq * nSamples)
+
+    # 计算归一化因子
+    normFac = snr / cp.sqrt(cp.abs(normSigSqrd))  # 使用绝对值避免复数问题
+
     return normFac * sigVec, normFac
 
 
 def innerprodpsd(xVec, yVec, sampFreq, psdVals):
     """
-    计算两个信号在给定PSD下的内积
-
-    参数:
-    xVec -- 第一个信号
-    yVec -- 第二个信号
-    sampFreq -- 采样频率
-    psdVals -- 功率谱密度值
-
-    返回:
-    inner_product -- 内积值
+    计算考虑PSD的内积
     """
+    # 确保输入向量长度一致
+    if len(xVec) != len(yVec):
+        # 调整长度使其匹配
+        min_len = min(len(xVec), len(yVec))
+        xVec = xVec[:min_len]
+        yVec = yVec[:min_len]
+
+    nSamples = len(xVec)
+
+    # 计算FFT
     fftX = cp.fft.fft(xVec)
     fftY = cp.fft.fft(yVec)
-    psdVec4Norm = cp.concatenate([psdVals, psdVals[-2:0:-1]])
-    return cp.real(cp.sum((fftX / psdVec4Norm) * cp.conj(fftY)) / (sampFreq * len(xVec)))
+
+    # # 准备PSD向量
+    # if len(psdVals) != nSamples // 2 + 1:
+    #     # 调整PSD向量长度
+    #     psdVals_adjusted = cp.zeros(nSamples // 2 + 1)
+    #     min_len = min(len(psdVals), nSamples // 2 + 1)
+    #     psdVals_adjusted[:min_len] = psdVals[:min_len]
+    #     psdVals = psdVals_adjusted
+
+    # 构建完整的PSD向量
+    if psdVals.shape[0] > 1:  # 确保有多于一个元素
+        psdVec4Norm = cp.concatenate([psdVals, psdVals[-2:0:-1]])
+    else:
+        # 处理特殊情况
+        psdVec4Norm = cp.zeros(nSamples)
+        psdVec4Norm[0] = psdVals[0]
+
+    # 确保长度匹配
+    if len(fftX) > len(psdVec4Norm):
+        psdVec4Norm = cp.pad(psdVec4Norm, (0, len(fftX) - len(psdVec4Norm)), 'constant',
+                             constant_values=psdVec4Norm[-1])
+    elif len(fftX) < len(psdVec4Norm):
+        psdVec4Norm = psdVec4Norm[:len(fftX)]
+    # 计算内积
+    inner_product = cp.sum((fftX * cp.conj(fftY)) / psdVec4Norm) / (sampFreq * nSamples)
+
+    # 返回实部
+    return cp.real(inner_product)
 
 
 def s2rv(xVec, params):
@@ -441,90 +575,86 @@ def crcbchkstdsrchrng(xVec):
     return cp.all((xVec >= 0) & (xVec <= 1), axis=1)
 
 
-# PyCBC SNR calculation function
+# # 定义新的SNR计算函数
+# def calculate_snr(signal, data, psd, sampFreq):
+#
+#     # 计算信号与数据的匹配度
+#     match_value = innerprodpsd(signal, data, sampFreq, psd)
+#
+#     # 信号自身的内积
+#     signal_norm = cp.sqrt(innerprodpsd(signal, signal, sampFreq, psd))
+#
+#     # 真实SNR是信号能量的平方根
+#     snr = match_value / signal_norm
+#
+#     return cp.abs(snr)
 def calculate_snr_pycbc(signal, psd, fs):
     """
-    Uses PyCBC's matched_filter to calculate SNR
+    使用PyCBC的matched_filter计算信噪比
+
+    参数:
+    signal - 信号数据（CuPy或NumPy数组）
+    psd - 功率谱密度（CuPy或NumPy数组）
+    fs - 采样频率（Hz）
+
+    返回:
+    最大信噪比值
     """
-    # Create PyCBC TimeSeries object
-    signal_np = cp.asnumpy(signal) if isinstance(signal, cp.ndarray) else signal
+    # 确保数据是NumPy数组
+    if isinstance(signal, cp.ndarray):
+        signal = cp.asnumpy(signal)
+    if isinstance(psd, cp.ndarray):
+        psd = cp.asnumpy(psd)
+
+    # 创建PyCBC的TimeSeries对象
     delta_t = 1.0 / fs
-    ts_signal = TimeSeries(signal_np, delta_t=delta_t)
+    ts_signal = TimeSeries(signal, delta_t=delta_t)
 
-    # Create PyCBC FrequencySeries object
-    delta_f = 1.0 / (len(signal_np) * delta_t)
-    # Ensure PSD length matches frequency points
-    psd_np = cp.asnumpy(psd) if isinstance(psd, cp.ndarray) else psd
+    # 创建PyCBC的FrequencySeries对象
+    delta_f = 1.0 / (len(signal) * delta_t)
 
-    # 确保PSD长度匹配
-    psd_length = len(signal_np) // 2 + 1
+    # 确保PSD长度与频率点数匹配
+    freq_len = len(signal) // 2 + 1
+    if len(psd) != freq_len:
+        # 如果PSD长度不匹配，可能需要调整
+        if len(psd) > freq_len:
+            psd = psd[:freq_len]
+        else:
+            # 如果PSD太短，可以扩展它（这里简单复制最后一个值）
+            extended_psd = np.zeros(freq_len)
+            extended_psd[:len(psd)] = psd
+            extended_psd[len(psd):] = psd[-1]
+            psd = extended_psd
 
-    if len(psd_np) > psd_length:
-        psd_np = psd_np[:psd_length]
-    elif len(psd_np) < psd_length:
-        # Extend PSD
-        extended_psd = np.ones(psd_length) * psd_np[-1]
-        extended_psd[:len(psd_np)] = psd_np
-        psd_np = extended_psd
+    psd_series = FrequencySeries(psd, delta_f=delta_f)
 
-    psd_series = FrequencySeries(psd_np, delta_f=delta_f)
+    # 使用matched_filter计算SNR
+    snr = pycbc.filter.matched_filter(ts_signal, ts_signal, psd=psd_series, low_frequency_cutoff=10.0)
 
-    # Use matched_filter to calculate SNR
-    try:
-        # Match template with signal (both the same)
-        snr = matched_filter(ts_signal, ts_signal, psd=psd_series, low_frequency_cutoff=10.0)
-        # Get maximum SNR value
-        max_snr = abs(snr).max()
-        return float(max_snr)
-    except Exception as e:
-        print(f"PyCBC method failed: {e}")
-        return 0.0  # Return 0 if calculation fails
+    # 获取最大SNR值
+    max_snr = abs(snr).max()
+
+    return float(max_snr)
 
 
 def analyze_mismatch(data, h_lens, samples, psdHigh):
-    """
-    计算信号匹配度的失配
-    """
-    # 创建PyCBC TimeSeries对象
-    data_np = cp.asnumpy(data) if isinstance(data, cp.ndarray) else data
-    h_lens_np = cp.asnumpy(h_lens) if isinstance(h_lens, cp.ndarray) else h_lens
+    # Convert inputs to CuPy arrays
+    data_cupy = cp.asarray(data)
+    h_lens_cupy = cp.asarray(h_lens)
+    # Calculate match value
+    match_value = (innerprodpsd(h_lens_cupy, data_cupy, samples, psdHigh) /
+                   cp.sqrt(innerprodpsd(h_lens_cupy, h_lens_cupy, samples, psdHigh) *
+                           innerprodpsd(data_cupy, data_cupy, samples, psdHigh)))
 
-    delta_t = 1.0 / samples
-    ts_data = TimeSeries(data_np, delta_t=delta_t)
-    ts_signal = TimeSeries(h_lens_np, delta_t=delta_t)
-
-    # 创建PyCBC FrequencySeries对象
-    delta_f = 1.0 / (len(data_np) * delta_t)
-    psd_np = cp.asnumpy(psdHigh) if isinstance(psdHigh, cp.ndarray) else psdHigh
-    psd_length = len(data_np) // 2 + 1
-
-    if len(psd_np) > psd_length:
-        psd_np = psd_np[:psd_length]
-    elif len(psd_np) < psd_length:
-        extended_psd = np.ones(psd_length) * psd_np[-1]
-        extended_psd[:len(psd_np)] = psd_np
-        psd_np = extended_psd
-
-    psd_series = FrequencySeries(psd_np, delta_f=delta_f)
-
-    # 计算匹配度
-    try:
-        from pycbc.filter import match
-        match_value, _ = match(ts_signal, ts_data, psd=psd_series, low_frequency_cutoff=10.0)
-        # 计算失配
-        epsilon = 1 - match_value
-        return float(epsilon)
-    except Exception as e:
-        print(f"PyCBC match calculation failed: {e}")
-        return 1.0  # 返回最大失配值
+    # Calculate mismatch
+    epsilon = 1 - match_value
+    return epsilon
 
 
 def classify_signal(snr, flux_ratio, time_delay, total_mass):
-    """
-    根据SNR、流量比和时间延迟对信号进行分类
-    """
     flux_threshold = 2 * (snr ** (-2))
-    inverse_mass = 1 / (2 ** (4 / 5) * total_mass)  # 质量的倒数（用于时间延迟阈值）
+    inverse_mass = (2 ** (4 / 5) * total_mass * G) / (c ** 3)  # 质量的倒数（用于时间延迟阈值）
+    print(f"inverse_massL: {inverse_mass}")
 
     # 分类标准
     if snr < 8:

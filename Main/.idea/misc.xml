@@ -3,5 +3,5 @@
   <component name="Black">
     <option name="sdkName" value="PSOlinux" />
   </component>
-  <component name="ProjectRootManager" version="2" project-jdk-name="PSOlinux" project-jdk-type="Python SDK" />
+  <component name="ProjectRootManager" version="2" project-jdk-name="Ubuntu" project-jdk-type="Python SDK" />
 </project>
