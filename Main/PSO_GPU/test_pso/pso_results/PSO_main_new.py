@@ -17,6 +17,8 @@ pc = 3.086e16  # Parsec to meters
 __all__ = [
     'crcbqcpsopsd',
     'crcbpso',
+    'generate_unlensed_gw',
+    'apply_lensing_effect',
     'crcbgenqcsig',
     'glrtqcsig4pso',
     'ssrqc',
@@ -26,11 +28,252 @@ __all__ = [
     'crcbchkstdsrchrng',
     'calculate_snr_pycbc',
     'analyze_mismatch',
-    'classify_signal'
+    'classify_signal',
+    'two_step_matching'
 ]
 
 
-def crcbqcpsopsd(inParams, psoParams, nRuns):
+def generate_unlensed_gw(dataX, r, m_c, tc, phi_c):
+    """
+    生成未透镜的引力波模板
+
+    Parameters:
+    -----------
+    dataX : array
+        时间序列
+    r : float
+        距离参数
+    m_c : float
+        组合质量参数
+    tc : float
+        合并时间
+    phi_c : float
+        初始相位
+
+    Returns:
+    --------
+    h : array
+        未透镜的引力波波形
+    """
+    # 转换参数单位
+    r = (10 ** r) * 1e6 * pc  # 距离（米）
+    m_c = (10 ** m_c) * M_sun  # 组合质量（kg）
+
+    # 确保输入是CuPy数组
+    if not isinstance(dataX, cp.ndarray):
+        dataX_gpu = cp.asarray(dataX)
+    else:
+        dataX_gpu = dataX
+
+    # 生成引力波信号
+    t = dataX_gpu  # 时间序列
+
+    # 在合并前的有效区域计算信号
+    valid_idx = t < tc
+    t_valid = t[valid_idx]
+
+    # 初始化波形
+    h = cp.zeros_like(t)
+
+    if cp.sum(valid_idx) > 0:  # 确保有有效区域
+        # 计算频率演化参数 Theta
+        Theta = c ** 3 * (tc - t_valid) / (5 * G * m_c)
+
+        # 计算振幅
+        A_gw = (G * m_c / (c ** 2 * r)) * Theta ** (-1 / 4)
+
+        # 计算相位
+        phase = 2 * phi_c - 2 * Theta ** (5 / 8)
+
+        # 生成波形
+        h[valid_idx] = A_gw * cp.cos(phase)
+
+    return h
+
+
+def apply_lensing_effect(h, t, A, delta_t, tc):
+    """
+    将透镜效应应用于引力波波形
+
+    Parameters:
+    -----------
+    h : array
+        未透镜的引力波波形
+    t : array
+        时间序列
+    A : float
+        透镜振幅比例
+    delta_t : float
+        时间延迟
+    tc : float
+        合并时间
+
+    Returns:
+    --------
+    h_lens : array
+        透镜化后的引力波波形
+    """
+    # 计算信号的FFT
+    n = len(h)
+    h_fft = cp.fft.fft(h)
+
+    # 计算频率数组
+    dt = t[1] - t[0]  # 采样间隔
+    fs = 1 / dt  # 采样频率
+    freqs = cp.fft.fftfreq(n, dt)
+
+    # 计算透镜传递函数 F(f) = 1 + A * exp(i * Phi)
+    # 其中 Phi = 2πf * delta_t
+    Phi = 2 * cp.pi * freqs * delta_t
+    lens_transfer = 1 + A * cp.exp(1j * Phi)
+
+    # 在频域中应用透镜效应
+    h_lensed_fft = h_fft * lens_transfer
+
+    # 转换回时域
+    h_lens = cp.real(cp.fft.ifft(h_lensed_fft))
+
+    # 确保信号在合并时间后为零
+    h_lens[t > tc] = 0
+
+    return h_lens
+
+
+def crcbgenqcsig(dataX, r, m_c, tc, phi_c, A, delta_t, use_lensing=True):
+    """
+    生成引力波信号，可选是否包含引力透镜效应
+
+    Parameters:
+    -----------
+    dataX : array
+        时间序列
+    r : float
+        距离参数
+    m_c : float
+        组合质量参数
+    tc : float
+        合并时间
+    phi_c : float
+        初始相位
+    A : float
+        透镜振幅比例
+    delta_t : float
+        时间延迟
+    use_lensing : bool, optional
+        是否应用透镜效应，默认为True
+
+    Returns:
+    --------
+    h : array
+        最终的引力波波形
+    """
+    # 生成未透镜波形
+    h = generate_unlensed_gw(dataX, r, m_c, tc, phi_c)
+
+    # 如果需要，应用透镜效应
+    if use_lensing:
+        # 确保输入是CuPy数组
+        if not isinstance(dataX, cp.ndarray):
+            t = cp.asarray(dataX)
+        else:
+            t = dataX
+
+        h = apply_lensing_effect(h, t, A, delta_t, tc)
+
+    return h
+
+
+def two_step_matching(params, dataY, psdHigh, sampFreq):
+    """
+    两步匹配过程：先用未透镜模板，根据失配度决定是否使用透镜模板
+
+    Parameters:
+    -----------
+    params : dict
+        参数字典，包含波形参数
+    dataY : array
+        观测数据
+    psdHigh : array
+        功率谱密度
+    sampFreq : float
+        采样频率
+
+    Returns:
+    --------
+    dict
+        包含匹配结果的字典
+    """
+    # 提取参数
+    r = params.get('r')
+    m_c = params.get('m_c')
+    tc = params.get('tc')
+    phi_c = params.get('phi_c')
+    A = params.get('A')
+    delta_t = params.get('delta_t')
+    dataX = params.get('dataX')
+
+    # 1. 使用未透镜模板
+    unlensed_signal = crcbgenqcsig(dataX, r, m_c, tc, phi_c, A, delta_t, use_lensing=False)
+
+    # 归一化信号
+    unlensed_signal, _ = normsig4psd(unlensed_signal, sampFreq, psdHigh, 1)
+
+    # 计算SNR
+    unlensed_snr = calculate_snr_pycbc(unlensed_signal, psdHigh, sampFreq)
+
+    # 计算失配度
+    unlensed_mismatch = analyze_mismatch(unlensed_signal, dataY, sampFreq, psdHigh)
+
+    # 失配度阈值
+    threshold = 1.0 / (unlensed_snr ** 2)
+
+    # 初始化结果
+    result = {
+        'unlensed_snr': unlensed_snr,
+        'unlensed_mismatch': unlensed_mismatch,
+        'threshold': threshold,
+        'is_lensed': False,
+        'lensed_signal': None,
+        'lensed_snr': None,
+        'lensed_mismatch': None,
+        'message': ""
+    }
+
+    # 2. 如果未透镜模板失配度大于阈值，尝试透镜模板
+    if unlensed_mismatch > threshold:
+        # 使用透镜模板
+        lensed_signal = crcbgenqcsig(dataX, r, m_c, tc, phi_c, A, delta_t, use_lensing=True)
+
+        # 归一化信号
+        lensed_signal, _ = normsig4psd(lensed_signal, sampFreq, psdHigh, 1)
+
+        # 计算SNR
+        lensed_snr = calculate_snr_pycbc(lensed_signal, psdHigh, sampFreq)
+
+        # 计算失配度
+        lensed_mismatch = analyze_mismatch(lensed_signal, dataY, sampFreq, psdHigh)
+
+        # 更新结果
+        result.update({
+            'lensed_signal': lensed_signal,
+            'lensed_snr': lensed_snr,
+            'lensed_mismatch': lensed_mismatch
+        })
+
+        # 判断是否为透镜波形
+        if lensed_mismatch < threshold:
+            result['is_lensed'] = True
+            result['message'] = "该波形是一个透镜化波形"
+        else:
+            result['message'] = "该波形大概率是一个透镜化波形"
+    else:
+        # 未透镜模板已经足够好匹配了
+        result['message'] = "该波形是一个未透镜化波形"
+
+    return result
+
+
+def crcbqcpsopsd(inParams, psoParams, nRuns, use_two_step=True):
     """
     对多个PSO运行进行管理的主函数
     """
@@ -83,6 +326,8 @@ def crcbqcpsopsd(inParams, psoParams, nRuns):
             'delta_t': 0,
             'estSig': cp.zeros(nSamples),
             'totalFuncEvals': [],
+            'is_lensed': False,
+            'lensing_message': ""
         }
         fitVal[lpruns] = outStruct[lpruns]['bestFitness']
 
@@ -106,11 +351,50 @@ def crcbqcpsopsd(inParams, psoParams, nRuns):
 
         r, m_c, tc, phi_c, A, delta_t = params
 
-        # 生成最佳信号
-        estSig = crcbgenqcsig(inParams['dataX'], r, m_c, tc, phi_c, A, delta_t)
-        estSig, _ = normsig4psd(estSig, inParams['sampFreq'], inParams['psdHigh'], 1)  # 计划删除进行检查
-        estAmp = innerprodpsd(inParams['dataY'], estSig, inParams['sampFreq'], inParams['psdHigh'])  # 计划删除进行检查
-        estSig = estAmp * estSig
+        # 添加两步匹配流程
+        if use_two_step:
+            # 准备参数字典
+            param_dict = {
+                'r': r,
+                'm_c': m_c,
+                'tc': tc,
+                'phi_c': phi_c,
+                'A': A,
+                'delta_t': delta_t,
+                'dataX': inParams['dataX']
+            }
+
+            # 执行两步匹配
+            matching_result = two_step_matching(
+                param_dict,
+                inParams['dataY'],
+                inParams['psdHigh'],
+                inParams['sampFreq']
+            )
+
+            # 使用匹配结果
+            is_lensed = matching_result['is_lensed']
+            lensing_message = matching_result['message']
+
+            # 根据匹配结果决定使用哪种信号
+            if is_lensed and matching_result['lensed_signal'] is not None:
+                estSig = matching_result['lensed_signal']
+            else:
+                # 生成最佳信号（使用原始方法以保持兼容性）
+                estSig = crcbgenqcsig(inParams['dataX'], r, m_c, tc, phi_c, A, delta_t, use_lensing=True)
+                estSig, _ = normsig4psd(estSig, inParams['sampFreq'], inParams['psdHigh'], 1)
+                estAmp = innerprodpsd(inParams['dataY'], estSig, inParams['sampFreq'], inParams['psdHigh'])
+                estSig = estAmp * estSig
+        else:
+            # 使用原始方法生成信号
+            estSig = crcbgenqcsig(inParams['dataX'], r, m_c, tc, phi_c, A, delta_t)
+            estSig, _ = normsig4psd(estSig, inParams['sampFreq'], inParams['psdHigh'], 1)
+            estAmp = innerprodpsd(inParams['dataY'], estSig, inParams['sampFreq'], inParams['psdHigh'])
+            estSig = estAmp * estSig
+
+            # 默认值
+            is_lensed = False
+            lensing_message = "未执行两步匹配"
 
         # 更新输出结果
         allRunsOutput.update({
@@ -122,7 +406,9 @@ def crcbqcpsopsd(inParams, psoParams, nRuns):
             'A': A,
             'delta_t': delta_t,
             'estSig': cp.asarray(estSig),
-            'totalFuncEvals': outStruct[lpruns]['totalFuncEvals']
+            'totalFuncEvals': outStruct[lpruns]['totalFuncEvals'],
+            'is_lensed': is_lensed,
+            'lensing_message': lensing_message
         })
         outResults['allRunsOutput'].append(allRunsOutput)
 
@@ -143,6 +429,8 @@ def crcbqcpsopsd(inParams, psoParams, nRuns):
         'phi_c': outResults['allRunsOutput'][bestRun]['phi_c'],
         'A': outResults['allRunsOutput'][bestRun]['A'],
         'delta_t': outResults['allRunsOutput'][bestRun]['delta_t'],
+        'is_lensed': outResults['allRunsOutput'][bestRun]['is_lensed'],
+        'lensing_message': outResults['allRunsOutput'][bestRun]['lensing_message']
     })
     return outResults, outStruct
 
@@ -204,7 +492,7 @@ def crcbpso(fitfuncHandle, nDim, **kwargs):
     # # 早期停止变量初始化
     no_improvement_count = 0
     prev_best_fitness = float(gbest_fitness)
-    max_no_improvement = psoParams['maxSteps'] // 2 # 连续超过一半总迭代次数但迭代无改进则停止
+    max_no_improvement = psoParams['maxSteps'] // 2  # 连续超过一半总迭代次数但迭代无改进则停止
 
     # 创建进度条
     with tqdm(range(psoParams['maxSteps']), desc=f'Run {psoParams["run"]}', position=0) as pbar:
@@ -284,7 +572,7 @@ def crcbpso(fitfuncHandle, nDim, **kwargs):
             else:
                 no_improvement_count = 0
                 prev_best_fitness = current_best_fitness
-            
+
             # 如果连续半数迭代的迭代结果无改进，则提前终止
             if no_improvement_count >= max_no_improvement:
                 print(
@@ -300,126 +588,6 @@ def crcbpso(fitfuncHandle, nDim, **kwargs):
 
     return returnData
 
-# 时域上生成波形和透镜
-# def crcbgenqcsig(dataX, r, m_c, tc, phi_c, A, delta_t):
-#     """
-#     生成引力波信号，包括时域中的引力透镜效应
-#     """
-#     # 转换参数单位
-#     r = (10 ** r) * 1e6 * pc  # 距离（米）
-#     m_c = (10 ** m_c) * M_sun  # 组合质量（kg）
-#     delta_t = 10 ** delta_t  # 时间延迟（秒）
-#
-#     # 确保输入是CuPy数组
-#     if not isinstance(dataX, cp.ndarray):
-#         dataX_gpu = cp.asarray(dataX)
-#     else:
-#         dataX_gpu = dataX
-#
-#     # 生成引力波信号
-#     t = dataX_gpu  # 时间序列
-#
-#     # 在合并前的有效区域计算信号
-#     valid_idx = t < tc
-#     t_valid = t[valid_idx]
-#
-#     # 初始化波形
-#     h = cp.zeros_like(t)
-#
-#     if cp.sum(valid_idx) > 0:  # 确保有有效区域
-#         # 计算频率演化参数 Theta
-#         Theta = c ** 3 * (tc - t_valid) / (5 * G * m_c)
-#
-#         # 计算振幅
-#         A_gw = (G * m_c / (c ** 2 * r)) * Theta ** (-1 / 4)
-#
-#         # 计算相位
-#         phase = 2 * phi_c - 2 * Theta ** (5 / 8)
-#
-#         # 生成波形
-#         h[valid_idx] = A_gw * cp.cos(phase)
-#
-#     # 时域中应用引力透镜效应
-#     # 1. 创建延迟信号
-#     h_delayed = cp.zeros_like(h)
-#
-#     # 计算延迟对应的样本数
-#     dt = t[1] - t[0]  # 采样间隔
-#     delay_samples = int(delta_t / dt)
-#
-#     # 如果延迟小于信号长度，则移动信号
-#     if delay_samples < len(h):
-#         h_delayed[delay_samples:] = h[:-delay_samples] if delay_samples > 0 else h
-#
-#     # 2. 应用透镜效应公式: h_lens(t) = h(t) + A * h(t - delta_t)
-#     h_lens = h + A * h_delayed
-#
-#     return h_lens
-
-# 频域上生成波形和透镜
-def crcbgenqcsig(dataX, r, m_c, tc, phi_c, A, delta_t):
-    """
-    生成引力波信号，并在频域中应用引力透镜效应
-    """
-    # 转换参数单位
-    r = (10 ** r) * 1e6 * pc  # 距离（米）
-    m_c = (10 ** m_c) * M_sun  # 组合质量（kg）
-    # delta_t = 10 ** delta_t  # 时间延迟（秒）
-
-    # 确保输入是CuPy数组
-    if not isinstance(dataX, cp.ndarray):
-        dataX_gpu = cp.asarray(dataX)
-    else:
-        dataX_gpu = dataX
-
-    # 生成引力波信号
-    t = dataX_gpu  # 时间序列
-
-    # 在合并前的有效区域计算信号
-    valid_idx = t < tc
-    t_valid = t[valid_idx]
-
-    # 初始化波形
-    h = cp.zeros_like(t)
-
-    if cp.sum(valid_idx) > 0:  # 确保有有效区域
-        # 计算频率演化参数 Theta
-        Theta = c ** 3 * (tc - t_valid) / (5 * G * m_c)
-
-        # 计算振幅
-        A_gw = (G * m_c / (c ** 2 * r)) * Theta ** (-1 / 4)
-
-        # 计算相位
-        phase = 2 * phi_c - 2 * Theta ** (5 / 8)
-
-        # 生成波形
-        h[valid_idx] = A_gw * cp.cos(phase)
-
-    # 在频域中应用引力透镜效应
-
-    # 1. 计算信号的FFT
-    n = len(h)
-    h_fft = cp.fft.fft(h)
-
-    # 2. 计算频率数组
-    dt = t[1] - t[0]  # 采样间隔
-    fs = 1 / dt  # 采样频率
-    freqs = cp.fft.fftfreq(n, dt)
-
-    # 3. 计算透镜传递函数 F(f) = 1 + A * exp(i * Phi)
-    # 其中 Phi = 2πf * delta_t
-    Phi = 2 * cp.pi * freqs * delta_t
-    lens_transfer = 1 + A * cp.exp(1j * Phi)
-
-    # 4. 在频域中应用透镜效应
-    h_lensed_fft = h_fft * lens_transfer
-
-    # 5. 转换回时域
-    h_lens = cp.real(cp.fft.ifft(h_lensed_fft))
-
-    h_lens[t > tc ] = 0
-
-    return h_lens
 
 def glrtqcsig4pso(xVec, params, returnxVec=0):
     """
@@ -478,14 +646,6 @@ def normsig4psd(sigVec, sampFreq, psdVec, snr):
     """
     nSamples = len(sigVec)
 
-    # # 确保PSD向量长度正确
-    # if len(psdVec) != nSamples // 2 + 1:
-    #     # 调整PSD向量长度
-    #     psdVec_adjusted = cp.zeros(nSamples // 2 + 1)
-    #     min_len = min(len(psdVec), nSamples // 2 + 1)
-    #     psdVec_adjusted[:min_len] = psdVec[:min_len]
-    #     psdVec = psdVec_adjusted
-
     # 构建完整的PSD向量（正负频率）
     if psdVec.shape[0] > 1:  # 确保有多于一个元素
         psdVec4Norm = cp.concatenate([psdVec, psdVec[-2:0:-1]])
@@ -493,9 +653,6 @@ def normsig4psd(sigVec, sampFreq, psdVec, snr):
         # 处理特殊情况
         psdVec4Norm = cp.zeros(nSamples)
         psdVec4Norm[0] = psdVec[0]
-
-    # # 避免除以零
-    # psdVec4Norm = cp.maximum(psdVec4Norm, 1e-47)
 
     # 计算信号的归一化因子
     fft_sig = cp.fft.fft(sigVec)
@@ -522,18 +679,6 @@ def innerprodpsd(xVec, yVec, sampFreq, psdVals):
 
     nSamples = len(xVec)
 
-    # 计算FFT
-    fftX = cp.fft.fft(xVec)
-    fftY = cp.fft.fft(yVec)
-
-    # # 准备PSD向量
-    # if len(psdVals) != nSamples // 2 + 1:
-    #     # 调整PSD向量长度
-    #     psdVals_adjusted = cp.zeros(nSamples // 2 + 1)
-    #     min_len = min(len(psdVals), nSamples // 2 + 1)
-    #     psdVals_adjusted[:min_len] = psdVals[:min_len]
-    #     psdVals = psdVals_adjusted
-
     # 构建完整的PSD向量
     if psdVals.shape[0] > 1:  # 确保有多于一个元素
         psdVec4Norm = cp.concatenate([psdVals, psdVals[-2:0:-1]])
@@ -543,11 +688,17 @@ def innerprodpsd(xVec, yVec, sampFreq, psdVals):
         psdVec4Norm[0] = psdVals[0]
 
     # 确保长度匹配
-    if len(fftX) > len(psdVec4Norm):
-        psdVec4Norm = cp.pad(psdVec4Norm, (0, len(fftX) - len(psdVec4Norm)), 'constant',
-                             constant_values=psdVec4Norm[-1])
-    elif len(fftX) < len(psdVec4Norm):
-        psdVec4Norm = psdVec4Norm[:len(fftX)]
+    if len(psdVec4Norm) != nSamples:
+        if len(psdVec4Norm) > nSamples:
+            psdVec4Norm = psdVec4Norm[:nSamples]
+        else:
+            psdVec4Norm = cp.pad(psdVec4Norm, (0, nSamples - len(psdVec4Norm)), 'constant',
+                                 constant_values=psdVec4Norm[-1])
+
+    # 计算FFT
+    fftX = cp.fft.fft(xVec)
+    fftY = cp.fft.fft(yVec)
+
     # 计算内积
     inner_product = cp.sum((fftX * cp.conj(fftY)) / psdVec4Norm) / (sampFreq * nSamples)
 
@@ -575,31 +726,7 @@ def crcbchkstdsrchrng(xVec):
     return cp.all((xVec >= 0) & (xVec <= 1), axis=1)
 
 
-# # 定义新的SNR计算函数
-# def calculate_snr(signal, data, psd, sampFreq):
-#
-#     # 计算信号与数据的匹配度
-#     match_value = innerprodpsd(signal, data, sampFreq, psd)
-#
-#     # 信号自身的内积
-#     signal_norm = cp.sqrt(innerprodpsd(signal, signal, sampFreq, psd))
-#
-#     # 真实SNR是信号能量的平方根
-#     snr = match_value / signal_norm
-#
-#     return cp.abs(snr)
 def calculate_snr_pycbc(signal, psd, fs):
-    """
-    使用PyCBC的matched_filter计算信噪比
-
-    参数:
-    signal - 信号数据（CuPy或NumPy数组）
-    psd - 功率谱密度（CuPy或NumPy数组）
-    fs - 采样频率（Hz）
-
-    返回:
-    最大信噪比值
-    """
     # 确保数据是NumPy数组
     if isinstance(signal, cp.ndarray):
         signal = cp.asnumpy(signal)
@@ -613,18 +740,18 @@ def calculate_snr_pycbc(signal, psd, fs):
     # 创建PyCBC的FrequencySeries对象
     delta_f = 1.0 / (len(signal) * delta_t)
 
-    # 确保PSD长度与频率点数匹配
-    freq_len = len(signal) // 2 + 1
-    if len(psd) != freq_len:
-        # 如果PSD长度不匹配，可能需要调整
-        if len(psd) > freq_len:
-            psd = psd[:freq_len]
-        else:
-            # 如果PSD太短，可以扩展它（这里简单复制最后一个值）
-            extended_psd = np.zeros(freq_len)
-            extended_psd[:len(psd)] = psd
-            extended_psd[len(psd):] = psd[-1]
-            psd = extended_psd
+    # # 确保PSD长度与频率点数匹配
+    # freq_len = len(signal) // 2 + 1
+    # if len(psd) != freq_len:
+    #     # 如果PSD长度不匹配，可能需要调整
+    #     if len(psd) > freq_len:
+    #         psd = psd[:freq_len]
+    #     else:
+    #         # 如果PSD太短，可以扩展它（这里简单复制最后一个值）
+    #         extended_psd = np.zeros(freq_len)
+    #         extended_psd[:len(psd)] = psd
+    #         extended_psd[len(psd):] = psd[-1]
+    #         psd = extended_psd
 
     psd_series = FrequencySeries(psd, delta_f=delta_f)
 
@@ -641,9 +768,9 @@ def analyze_mismatch(data, h_lens, samples, psdHigh):
     # Convert inputs to CuPy arrays
     data_cupy = cp.asarray(data)
     h_lens_cupy = cp.asarray(h_lens)
-    # Calculate match value
+
     match_value = (innerprodpsd(h_lens_cupy, data_cupy, samples, psdHigh) /
-                   cp.sqrt(innerprodpsd(h_lens_cupy, h_lens_cupy, samples, psdHigh) *
+                   np.sqrt(innerprodpsd(h_lens_cupy, h_lens_cupy, samples, psdHigh) *
                            innerprodpsd(data_cupy, data_cupy, samples, psdHigh)))
 
     # Calculate mismatch
@@ -654,7 +781,6 @@ def analyze_mismatch(data, h_lens, samples, psdHigh):
 def classify_signal(snr, flux_ratio, time_delay, total_mass):
     flux_threshold = 2 * (snr ** (-2))
     inverse_mass = (2 ** (4 / 5) * total_mass * G) / (c ** 3)  # 质量的倒数（用于时间延迟阈值）
-    print(f"inverse_massL: {inverse_mass}")
 
     # 分类标准
     if snr < 8:
