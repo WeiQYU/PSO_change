@@ -28,7 +28,7 @@ __all__ = [
     'crcbchkstdsrchrng',
     'calculate_snr_pycbc',
     'analyze_mismatch',
-    'classify_signal',
+    # 'classify_signal',
     'two_step_matching'
 ]
 
@@ -212,7 +212,7 @@ def two_step_matching(params, dataY, psdHigh, sampFreq):
     delta_t = params.get('delta_t')
     dataX = params.get('dataX')
 
-    # 1. 使用未透镜模板
+    # 使用未透镜模板
     unlensed_signal = crcbgenqcsig(dataX, r, m_c, tc, phi_c, A, delta_t, use_lensing=False)
 
     # 归一化信号
@@ -225,6 +225,7 @@ def two_step_matching(params, dataY, psdHigh, sampFreq):
     unlensed_mismatch = analyze_mismatch(unlensed_signal, dataY, sampFreq, psdHigh)
 
     # 失配度阈值
+    # 
     threshold = 1.0 / (unlensed_snr ** 2)
 
     # 初始化结果
@@ -239,7 +240,7 @@ def two_step_matching(params, dataY, psdHigh, sampFreq):
         'message': ""
     }
 
-    # 2. 如果未透镜模板失配度大于阈值，尝试透镜模板
+    # 如果未透镜模板失配度大于阈值，尝试透镜模板
     if unlensed_mismatch > threshold:
         # 使用透镜模板
         lensed_signal = crcbgenqcsig(dataX, r, m_c, tc, phi_c, A, delta_t, use_lensing=True)
@@ -261,14 +262,16 @@ def two_step_matching(params, dataY, psdHigh, sampFreq):
         })
 
         # 判断是否为透镜波形
-        if lensed_mismatch < threshold:
-            result['is_lensed'] = True
-            result['message'] = "该波形是一个透镜化波形"
-        else:
-            result['message'] = "该波形大概率是一个透镜化波形"
+        # if lensed_mismatch < threshold:
+        #     result['is_lensed'] = True
+        #     result['message'] = "This is a lens signal"
+        # else:
+        #     result['message'] = "该波形大概率是一个透镜化波形"
+        result['is_lensed'] = True
+        result['message'] = "This is a lens signal"
     else:
         # 未透镜模板已经足够好匹配了
-        result['message'] = "该波形是一个未透镜化波形"
+        result['message'] = "This is a signal"
 
     return result
 
@@ -778,26 +781,26 @@ def analyze_mismatch(data, h_lens, samples, psdHigh):
     return epsilon
 
 
-def classify_signal(snr, flux_ratio, time_delay, total_mass):
-    flux_threshold = 2 * (snr ** (-2))
-    inverse_mass = (2 ** (4 / 5) * total_mass * G) / (c ** 3)  # 质量的倒数（用于时间延迟阈值）
-
-    # 分类标准
-    if snr < 8:
-        classification = "Pure Noise (SNR too low)"
-        is_lensed = False
-    else:
-        if flux_ratio >= flux_threshold and time_delay >= inverse_mass:
-            classification = "Lensed Signal (matches both criteria)"
-            is_lensed = True
-        elif flux_ratio >= flux_threshold:
-            classification = "Potential Lensed Signal (matches flux ratio criterion only,I)"
-            is_lensed = False
-        elif time_delay >= inverse_mass:
-            classification = "Potential Lensed Signal (matches time delay criterion only,Δtd)"
-            is_lensed = False
-        else:
-            classification = "Unlensed Signal (doesn't meet lensing criteria)"
-            is_lensed = False
-
-    return classification, flux_threshold, inverse_mass, is_lensed
+# def classify_signal(snr, flux_ratio, time_delay, total_mass):
+#     flux_threshold = 2 * (snr ** (-2))
+#     inverse_mass = (2 ** (4 / 5) * total_mass * G) / (c ** 3)  # 质量的倒数（用于时间延迟阈值）
+#
+#     # 分类标准
+#     if snr < 8:
+#         classification = "Pure Noise (SNR too low)"
+#         is_lensed = False
+#     else:
+#         if flux_ratio >= flux_threshold and time_delay >= inverse_mass:
+#             classification = "Lensed Signal (matches both criteria)"
+#             is_lensed = True
+#         elif flux_ratio >= flux_threshold:
+#             classification = "Potential Lensed Signal (matches flux ratio criterion only,I)"
+#             is_lensed = False
+#         elif time_delay >= inverse_mass:
+#             classification = "Potential Lensed Signal (matches time delay criterion only,Δtd)"
+#             is_lensed = False
+#         else:
+#             classification = "Unlensed Signal (doesn't meet lensing criteria)"
+#             is_lensed = False
+#
+#     return classification, flux_threshold, inverse_mass, is_lensed
