@@ -15,7 +15,7 @@ pc = 3.086e16
 print("加载数据...")
 # Load data
 TrainingData = scio.loadmat('../../generate_ligo/noise.mat')
-analysisData = scio.loadmat('../../generate_ligo/data_without_lens.mat')
+analysisData = scio.loadmat('../../generate_ligo/data.mat')
 print("加载完毕")
 
 # Convert data to CuPy arrays
@@ -27,8 +27,8 @@ nSamples = dataY.size
 Fs = float(analysisData['samples'][0][0])
 # 搜索范围参数
 #                r  mc tc phi A  Δtd
-rmin = cp.array([-2, 0, 0, 0, 0, 0])  # parameter range lower bounds
-rmax = cp.array([4, 3, 8, 2 * np.pi, 1, 7])  # parameter range upper bounds
+rmin = cp.array([1, 0, 0, 0, 0, 0])  # parameter range lower bounds
+rmax = cp.array([4, 3, 8, np.pi, 1, 7])  # parameter range upper bounds
 # 时间域设置
 dt = 1 / Fs  # sampling rate Hz
 t = cp.arange(0, 8, dt)  # Using CuPy for t array
@@ -67,6 +67,30 @@ print("PSO已部署完毕,芜湖！！！！")
 # 运行PSO优化，启用两步匹配过程
 outResults, outStruct = crcbqcpsopsd(inParams, pso_config, nRuns, use_two_step=True)
 
+# 新增：在每次PSO运行结束后输出匹配结果
+print("\n============= 每次PSO运行的匹配结果 =============")
+for lpruns in range(nRuns):
+    run_sig = cp.real(outResults['allRunsOutput'][lpruns]['estSig'])
+    run_snr_pycbc = calculate_snr_pycbc(run_sig, psdHigh, Fs)
+
+    print(f"\n运行 {lpruns + 1}:")
+    if outResults['allRunsOutput'][lpruns]['is_noise']:
+        print(f"  消息: {outResults['allRunsOutput'][lpruns]['lensing_message']}")
+        print(f"  SNR: {run_snr_pycbc:.4f} (小于阈值8)")
+        print(f"  状态: 噪声")
+    else:
+        run_epsilon = analyze_mismatch(run_sig, dataY_only_signal, Fs, psdHigh)
+        mismatch_threshold = 1.0 / run_snr_pycbc
+        print(f"  消息: {outResults['allRunsOutput'][lpruns]['lensing_message']}")
+        print(f"  SNR: {run_snr_pycbc:.4f}")
+        print(f"  失配度 (Mismatch): {run_epsilon:.6f}")
+        print(f"  阈值 (Threshold): {mismatch_threshold:.6f}")
+
+        if outResults['allRunsOutput'][lpruns]['is_lensed']:
+            print(f"  状态: 透镜信号")
+        else:
+            print(f"  状态: 非透镜信号")
+
 # 对于绘图，我们需要将数据移回CPU
 # 只在需要可视化时进行转换
 t_cpu = cp.asnumpy(t)
@@ -100,16 +124,28 @@ for lpruns in range(nRuns):
     # 获取估计信号的实部并转移到CPU进行绘图
     est_sig = cp.asnumpy(cp.real(outResults['allRunsOutput'][lpruns]['estSig']))
 
-    # 添加标签以显示是否为透镜波形
-    lensing_status = "Lensed" if outResults['allRunsOutput'][lpruns]['is_lensed'] else "Unlensed"
+    # 添加标签以显示信号类型
+    if outResults['allRunsOutput'][lpruns]['is_noise']:
+        signal_status = "Noise"
+    elif outResults['allRunsOutput'][lpruns]['is_lensed']:
+        signal_status = "Lensed"
+    else:
+        signal_status = "Unlensed"
+
     ax.plot(t_cpu, est_sig, color=colors[lpruns], lw=0.8,
-            label=f'Run {lpruns + 1} ({lensing_status})')
+            label=f'Run {lpruns + 1} ({signal_status})')
 
 # 突出显示最佳信号
 best_sig = cp.asnumpy(cp.real(outResults['bestSig']))
-best_lensing_status = "Lensed" if outResults['is_lensed'] else "Unlensed"
+if outResults['is_noise']:
+    best_signal_status = "Noise"
+elif outResults['is_lensed']:
+    best_signal_status = "Lensed"
+else:
+    best_signal_status = "Unlensed"
+
 ax.plot(t_cpu, best_sig, 'red', lw=1.5,
-        label=f'Best Fit (Run {outResults["bestRun"] + 1}, {best_lensing_status})')
+        label=f'Best Fit (Run {outResults["bestRun"] + 1}, {best_signal_status})')
 
 # 设置标签和图例
 plt.xlabel('Time (s)')
@@ -155,25 +191,19 @@ best_run_idx = outResults['bestRun']
 bestSig_real = cp.real(outResults['bestSig'])
 
 # 计算SNR
-best_snr_optimal = -cp.sqrt(outResults['bestFitness'])  # 取负值，因为优化是最小化负SNR平方
 best_snr_pycbc = calculate_snr_pycbc(bestSig_real, psdHigh, Fs)
 
-# 使用PyCBC计算失配度
-best_epsilon = analyze_mismatch(bestSig_real, dataY_only_signal, Fs, psdHigh)
+# 使用PyCBC计算失配度（如果不是噪声）
+if not outResults['is_noise']:
+    best_epsilon = analyze_mismatch(bestSig_real, dataY_only_signal, Fs, psdHigh)
 
 # 从最佳运行中提取参数
-# best_total_mass = 10 ** outResults['allRunsOutput'][best_run_idx]['m_c'] * M_sun  # 单位：kg
 best_flux_ratio = outResults['allRunsOutput'][best_run_idx]['A']  # 将振幅A作为透镜振幅比例
 best_time_delay = outResults['allRunsOutput'][best_run_idx]['delta_t']  # 单位：秒
-
-# # 基于PyCBC SNR进行分类
-# best_classification, best_flux_threshold, best_timedelay_threshold, best_is_lensed = classify_signal(
-#     float(best_snr_pycbc), best_flux_ratio, best_time_delay, best_total_mass)
 
 # 打印结果
 print('\n============= 最终结果 =============')
 print(f"最佳适应度（内积结果）: {outResults['bestFitness']:.4f}")
-print(f"最优SNR（从适应度计算）: {best_snr_optimal:.2f}")
 print(f"PyCBC SNR（独立计算）: {best_snr_pycbc:.2f}")
 print(f"r : {10 ** outResults['allRunsOutput'][outResults['bestRun']]['r']:.4f}")
 print(f"Mc: {10 ** outResults['allRunsOutput'][outResults['bestRun']]['m_c']:.4f}")
@@ -182,19 +212,18 @@ print(f"phi_c: {outResults['allRunsOutput'][outResults['bestRun']]['phi_c'] / np
 print(f"A: {outResults['allRunsOutput'][outResults['bestRun']]['A']:.4f}")
 print(f"delta_t: {outResults['allRunsOutput'][outResults['bestRun']]['delta_t']:.4f}")
 
-# 打印两步匹配结果
-print(f"\n============= 透镜分析 =============")
-print(f"两步匹配结果: {outResults['lensing_message']}")
-print(f"是否为透镜波形: {outResults['is_lensed']}")
-print(f"失配度: {best_epsilon:.6f}")
-print(f"失配度阈值 (1/SNR²): {1 / (best_snr_pycbc ** 2):.6f}")
-
-# print(f"\n============= 传统分类 =============")
-# print(f"传统分类方法: {best_classification}")
-# print(f"变化率: {best_flux_ratio:.4f}, 时间延迟: {best_time_delay:.4f} s")
-# print(f"总质量: {best_total_mass / M_sun:.4f} M_sun")
-# print(f"振幅比例阈值: {best_flux_threshold:.6f}")
-# print(f"时间延迟阈值: {best_timedelay_threshold:.6f}")
+# 打印分类结果
+print(f"\n============= 信号分类 =============")
+if outResults['is_noise']:
+    print(f"分类结果: 噪声 (SNR < 8)")
+    print(f"SNR: {best_snr_pycbc:.2f} (低于阈值8)")
+else:
+    # 打印两步匹配结果
+    print(f"两步匹配结果: {outResults['lensing_message']}")
+    print(f"是否为透镜波形: {outResults['is_lensed']}")
+    print(f"失配度: {best_epsilon:.6f}")
+    print(f"失配度阈值 (1/SNR): {1 / best_snr_pycbc:.6f}")
+    print(f"变化率: {best_flux_ratio:.4f}, 时间延迟: {best_time_delay:.4f} s")
 
 # 最终比较图 - 仅为绘图转换为CPU
 bestData_cpu = cp.asnumpy(cp.real(dataY))
@@ -207,8 +236,13 @@ plt.plot(t_cpu, bestSig_cpu, 'r', label='Best Signal')
 plt.xlabel('Time (s)')
 plt.ylabel('Strain')
 plt.legend()
-lens_status = "Lensed" if outResults['is_lensed'] else "Unlensed"
-plt.title(f'Best Signal Comparison ({lens_status}): {outResults["lensing_message"]}')
+
+# 根据信号类型设置标题
+if outResults['is_noise']:
+    plt.title(f'Best Signal Comparison (Noise): SNR = {best_snr_pycbc:.2f} < 8')
+else:
+    signal_type = "Lensed" if outResults['is_lensed'] else "Unlensed"
+    plt.title(f'Best Signal Comparison ({signal_type}): {outResults["lensing_message"]}')
 
 # 保存最终比较图
 plt.savefig('signal_comparison_plot.png')
@@ -230,22 +264,14 @@ for lpruns in range(nRuns):
     run_flux_ratio = outResults['allRunsOutput'][lpruns]['A']
     run_time_delay = outResults['allRunsOutput'][lpruns]['delta_t']
 
-    # 计算此运行的失配度
-    run_epsilon = analyze_mismatch(run_sig, dataY_only_signal, Fs, psdHigh)
+    # 计算此运行的失配度（如果不是噪声）
+    if not outResults['allRunsOutput'][lpruns]['is_noise']:
+        run_epsilon = analyze_mismatch(run_sig, dataY_only_signal, Fs, psdHigh)
+    else:
+        run_epsilon = None
 
     # 失配度阈值
-    mismatch_threshold = 1.0 / (run_snr_pycbc ** 2)
-
-    # 使用PyCBC SNR对此运行进行分类
-    # run_classification, run_flux_threshold, run_timedelay_threshold, run_is_lensed = classify_signal(
-    #     float(run_snr_pycbc), run_flux_ratio, run_time_delay, run_mass)
-
-    # 打印每次运行的分类
-    print(f"\n运行 {lpruns + 1} 结果:")
-    print(f"  两步匹配结果: {outResults['allRunsOutput'][lpruns]['lensing_message']}")
-    print(f"  是否为透镜波形: {outResults['allRunsOutput'][lpruns]['is_lensed']}")
-    print(f"  SNR: {run_snr_pycbc:.2f}, 失配度: {run_epsilon:.6f}, 阈值: {mismatch_threshold:.6f}")
-    # print(f"  传统分类: {run_classification}")
+    mismatch_threshold = 1.0 / run_snr_pycbc
 
     # 添加到结果中 - 确保所有值都是Python类型，而不是CuPy数组
     run_result = {
@@ -259,18 +285,16 @@ for lpruns in range(nRuns):
         'delta_t': float(outResults['allRunsOutput'][lpruns]['delta_t']),
         'SNR_optimal': float(run_snr_optimal),
         'SNR_pycbc': float(run_snr_pycbc),
-        'mismatch': float(run_epsilon),
+        'is_noise': outResults['allRunsOutput'][lpruns]['is_noise'],
+        'mismatch': float(run_epsilon) if run_epsilon is not None else None,
         'mismatch_threshold': float(mismatch_threshold),
-        # 'flux_ratio_threshold': float(run_flux_threshold),
-        # 'time_delay_threshold': float(run_timedelay_threshold),
         'two_step_match_result': outResults['allRunsOutput'][lpruns]['lensing_message'],
         'two_step_is_lensed': outResults['allRunsOutput'][lpruns]['is_lensed'],
-        # 'traditional_classification': run_classification,
-        # 'traditional_is_lensed': run_is_lensed
     }
     all_results.append(run_result)
 
 # 将最佳结果添加为汇总条目（标记为"best"）
+best_mismatch = best_epsilon if not outResults['is_noise'] else None
 best_result = {
     'run': 'best',
     'fitness': float(outResults['bestFitness']),
@@ -280,22 +304,18 @@ best_result = {
     'phi_c': float(outResults['allRunsOutput'][best_run_idx]['phi_c'] / np.pi),
     'A': float(outResults['allRunsOutput'][best_run_idx]['A']),
     'delta_t': float(outResults['allRunsOutput'][best_run_idx]['delta_t']),
-    'SNR_optimal': float(best_snr_optimal),
     'SNR_pycbc': float(best_snr_pycbc),
-    'mismatch': float(best_epsilon),
-    'mismatch_threshold': float(1 / (best_snr_pycbc ** 2)),
-    # 'flux_ratio_threshold': float(best_flux_threshold),
-    # 'time_delay_threshold': float(best_timedelay_threshold),
+    'is_noise': outResults['is_noise'],
+    'mismatch': float(best_mismatch) if best_mismatch is not None else None,
+    'mismatch_threshold': float(1 / best_snr_pycbc),
     'two_step_match_result': outResults['lensing_message'],
     'two_step_is_lensed': outResults['is_lensed'],
-    # 'traditional_classification': best_classification,
-    # 'traditional_is_lensed': best_is_lensed
 }
 all_results.append(best_result)
 
 # 定义CSV的列
 columns = ['run', 'fitness', 'r', 'm_c', 'tc', 'phi_c', 'A', 'delta_t',
-           'SNR_optimal', 'SNR_pycbc', 'mismatch', 'mismatch_threshold',
+           'SNR_pycbc', 'is_noise', 'mismatch', 'mismatch_threshold',
            'two_step_match_result', 'two_step_is_lensed']
 
 # 使用pandas保存为CSV以便更好的格式化

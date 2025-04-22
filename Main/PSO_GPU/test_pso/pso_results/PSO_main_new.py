@@ -1,5 +1,4 @@
 import cupy as cp
-from cupyx.scipy.fftpack import fft
 from pycbc.types import FrequencySeries, TimeSeries
 from tqdm import tqdm
 import numpy as np
@@ -28,33 +27,11 @@ __all__ = [
     'crcbchkstdsrchrng',
     'calculate_snr_pycbc',
     'analyze_mismatch',
-    # 'classify_signal',
     'two_step_matching'
 ]
 
 
 def generate_unlensed_gw(dataX, r, m_c, tc, phi_c):
-    """
-    生成未透镜的引力波模板
-
-    Parameters:
-    -----------
-    dataX : array
-        时间序列
-    r : float
-        距离参数
-    m_c : float
-        组合质量参数
-    tc : float
-        合并时间
-    phi_c : float
-        初始相位
-
-    Returns:
-    --------
-    h : array
-        未透镜的引力波波形
-    """
     # 转换参数单位
     r = (10 ** r) * 1e6 * pc  # 距离（米）
     m_c = (10 ** m_c) * M_sun  # 组合质量（kg）
@@ -92,27 +69,6 @@ def generate_unlensed_gw(dataX, r, m_c, tc, phi_c):
 
 
 def apply_lensing_effect(h, t, A, delta_t, tc):
-    """
-    将透镜效应应用于引力波波形
-
-    Parameters:
-    -----------
-    h : array
-        未透镜的引力波波形
-    t : array
-        时间序列
-    A : float
-        透镜振幅比例
-    delta_t : float
-        时间延迟
-    tc : float
-        合并时间
-
-    Returns:
-    --------
-    h_lens : array
-        透镜化后的引力波波形
-    """
     # 计算信号的FFT
     n = len(h)
     h_fft = cp.fft.fft(h)
@@ -140,33 +96,6 @@ def apply_lensing_effect(h, t, A, delta_t, tc):
 
 
 def crcbgenqcsig(dataX, r, m_c, tc, phi_c, A, delta_t, use_lensing=True):
-    """
-    生成引力波信号，可选是否包含引力透镜效应
-
-    Parameters:
-    -----------
-    dataX : array
-        时间序列
-    r : float
-        距离参数
-    m_c : float
-        组合质量参数
-    tc : float
-        合并时间
-    phi_c : float
-        初始相位
-    A : float
-        透镜振幅比例
-    delta_t : float
-        时间延迟
-    use_lensing : bool, optional
-        是否应用透镜效应，默认为True
-
-    Returns:
-    --------
-    h : array
-        最终的引力波波形
-    """
     # 生成未透镜波形
     h = generate_unlensed_gw(dataX, r, m_c, tc, phi_c)
 
@@ -184,25 +113,6 @@ def crcbgenqcsig(dataX, r, m_c, tc, phi_c, A, delta_t, use_lensing=True):
 
 
 def two_step_matching(params, dataY, psdHigh, sampFreq):
-    """
-    两步匹配过程：先用未透镜模板，根据失配度决定是否使用透镜模板
-
-    Parameters:
-    -----------
-    params : dict
-        参数字典，包含波形参数
-    dataY : array
-        观测数据
-    psdHigh : array
-        功率谱密度
-    sampFreq : float
-        采样频率
-
-    Returns:
-    --------
-    dict
-        包含匹配结果的字典
-    """
     # 提取参数
     r = params.get('r')
     m_c = params.get('m_c')
@@ -221,12 +131,25 @@ def two_step_matching(params, dataY, psdHigh, sampFreq):
     # 计算SNR
     unlensed_snr = calculate_snr_pycbc(unlensed_signal, psdHigh, sampFreq)
 
+    # 新增: 如果SNR小于8，直接判断为噪声
+    if unlensed_snr < 8:
+        return {
+            'unlensed_snr': unlensed_snr,
+            'unlensed_mismatch': None,
+            'threshold': None,
+            'is_lensed': False,
+            'is_noise': True,  # 新增标志
+            'lensed_signal': None,
+            'lensed_snr': None,
+            'lensed_mismatch': None,
+            'message': "This is noise (SNR < 8)"
+        }
+
     # 计算失配度
     unlensed_mismatch = analyze_mismatch(unlensed_signal, dataY, sampFreq, psdHigh)
 
     # 失配度阈值
-    # 
-    threshold = 1.0 / (unlensed_snr ** 2)
+    threshold = 1.0 / unlensed_snr
 
     # 初始化结果
     result = {
@@ -234,6 +157,7 @@ def two_step_matching(params, dataY, psdHigh, sampFreq):
         'unlensed_mismatch': unlensed_mismatch,
         'threshold': threshold,
         'is_lensed': False,
+        'is_noise': False,  # 新增标志
         'lensed_signal': None,
         'lensed_snr': None,
         'lensed_mismatch': None,
@@ -261,16 +185,10 @@ def two_step_matching(params, dataY, psdHigh, sampFreq):
             'lensed_mismatch': lensed_mismatch
         })
 
-        # 判断是否为透镜波形
-        # if lensed_mismatch < threshold:
-        #     result['is_lensed'] = True
-        #     result['message'] = "This is a lens signal"
-        # else:
-        #     result['message'] = "该波形大概率是一个透镜化波形"
         result['is_lensed'] = True
         result['message'] = "This is a lens signal"
     else:
-        # 未透镜模板已经足够好匹配了
+        # 未透镜模板已经足够匹配
         result['message'] = "This is a signal"
 
     return result
@@ -304,6 +222,7 @@ def crcbqcpsopsd(inParams, psoParams, nRuns, use_two_step=True):
         'phi_c': None,
         'A': None,
         'delta_t': None,
+        'is_noise': False  # 新增标志
     }
 
     # 运行多次PSO优化，每次使用不同的随机初始种子
@@ -330,6 +249,7 @@ def crcbqcpsopsd(inParams, psoParams, nRuns, use_two_step=True):
             'estSig': cp.zeros(nSamples),
             'totalFuncEvals': [],
             'is_lensed': False,
+            'is_noise': False,  # 新增标志
             'lensing_message': ""
         }
         fitVal[lpruns] = outStruct[lpruns]['bestFitness']
@@ -377,14 +297,20 @@ def crcbqcpsopsd(inParams, psoParams, nRuns, use_two_step=True):
 
             # 使用匹配结果
             is_lensed = matching_result['is_lensed']
+            is_noise = matching_result.get('is_noise', False)  # 获取是否为噪声的标志，如果不存在则默认为False
             lensing_message = matching_result['message']
 
             # 根据匹配结果决定使用哪种信号
-            if is_lensed and matching_result['lensed_signal'] is not None:
+            if is_noise:
+                # 如果是噪声，仍然使用估计的信号，但标记为噪声
+                estSig = unlensed_signal = crcbgenqcsig(inParams['dataX'], r, m_c, tc, phi_c, A, delta_t,
+                                                        use_lensing=False)
+                estSig, _ = normsig4psd(estSig, inParams['sampFreq'], inParams['psdHigh'], 1)
+            elif is_lensed and matching_result['lensed_signal'] is not None:
                 estSig = matching_result['lensed_signal']
             else:
                 # 生成最佳信号（使用原始方法以保持兼容性）
-                estSig = crcbgenqcsig(inParams['dataX'], r, m_c, tc, phi_c, A, delta_t, use_lensing=True)
+                estSig = crcbgenqcsig(inParams['dataX'], r, m_c, tc, phi_c, A, delta_t, use_lensing=False)
                 estSig, _ = normsig4psd(estSig, inParams['sampFreq'], inParams['psdHigh'], 1)
                 estAmp = innerprodpsd(inParams['dataY'], estSig, inParams['sampFreq'], inParams['psdHigh'])
                 estSig = estAmp * estSig
@@ -397,6 +323,7 @@ def crcbqcpsopsd(inParams, psoParams, nRuns, use_two_step=True):
 
             # 默认值
             is_lensed = False
+            is_noise = False
             lensing_message = "未执行两步匹配"
 
         # 更新输出结果
@@ -411,6 +338,7 @@ def crcbqcpsopsd(inParams, psoParams, nRuns, use_two_step=True):
             'estSig': cp.asarray(estSig),
             'totalFuncEvals': outStruct[lpruns]['totalFuncEvals'],
             'is_lensed': is_lensed,
+            'is_noise': is_noise,  # 更新噪声标志
             'lensing_message': lensing_message
         })
         outResults['allRunsOutput'].append(allRunsOutput)
@@ -433,6 +361,7 @@ def crcbqcpsopsd(inParams, psoParams, nRuns, use_two_step=True):
         'A': outResults['allRunsOutput'][bestRun]['A'],
         'delta_t': outResults['allRunsOutput'][bestRun]['delta_t'],
         'is_lensed': outResults['allRunsOutput'][bestRun]['is_lensed'],
+        'is_noise': outResults['allRunsOutput'][bestRun]['is_noise'],  # 更新噪声标志
         'lensing_message': outResults['allRunsOutput'][bestRun]['lensing_message']
     })
     return outResults, outStruct
@@ -743,19 +672,6 @@ def calculate_snr_pycbc(signal, psd, fs):
     # 创建PyCBC的FrequencySeries对象
     delta_f = 1.0 / (len(signal) * delta_t)
 
-    # # 确保PSD长度与频率点数匹配
-    # freq_len = len(signal) // 2 + 1
-    # if len(psd) != freq_len:
-    #     # 如果PSD长度不匹配，可能需要调整
-    #     if len(psd) > freq_len:
-    #         psd = psd[:freq_len]
-    #     else:
-    #         # 如果PSD太短，可以扩展它（这里简单复制最后一个值）
-    #         extended_psd = np.zeros(freq_len)
-    #         extended_psd[:len(psd)] = psd
-    #         extended_psd[len(psd):] = psd[-1]
-    #         psd = extended_psd
-
     psd_series = FrequencySeries(psd, delta_f=delta_f)
 
     # 使用matched_filter计算SNR
@@ -779,28 +695,3 @@ def analyze_mismatch(data, h_lens, samples, psdHigh):
     # Calculate mismatch
     epsilon = 1 - match_value
     return epsilon
-
-
-# def classify_signal(snr, flux_ratio, time_delay, total_mass):
-#     flux_threshold = 2 * (snr ** (-2))
-#     inverse_mass = (2 ** (4 / 5) * total_mass * G) / (c ** 3)  # 质量的倒数（用于时间延迟阈值）
-#
-#     # 分类标准
-#     if snr < 8:
-#         classification = "Pure Noise (SNR too low)"
-#         is_lensed = False
-#     else:
-#         if flux_ratio >= flux_threshold and time_delay >= inverse_mass:
-#             classification = "Lensed Signal (matches both criteria)"
-#             is_lensed = True
-#         elif flux_ratio >= flux_threshold:
-#             classification = "Potential Lensed Signal (matches flux ratio criterion only,I)"
-#             is_lensed = False
-#         elif time_delay >= inverse_mass:
-#             classification = "Potential Lensed Signal (matches time delay criterion only,Δtd)"
-#             is_lensed = False
-#         else:
-#             classification = "Unlensed Signal (doesn't meet lensing criteria)"
-#             is_lensed = False
-#
-#     return classification, flux_threshold, inverse_mass, is_lensed
