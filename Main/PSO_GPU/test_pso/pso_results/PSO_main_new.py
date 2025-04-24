@@ -28,82 +28,82 @@ __all__ = [
     'crcbchkstdsrchrng',
     'calculate_snr_pycbc',
     'analyze_mismatch',
-    # 'classify_signal',
+    'pycbc_calculate_match',
     'two_step_matching'
 ]
 
 
 def generate_unlensed_gw(dataX, r, m_c, tc, phi_c):
-    # 转换参数单位
-    r = (10 ** r) * 1e6 * pc  # 距离（米）
-    m_c = (10 ** m_c) * M_sun  # 组合质量（kg）
+    # Convert parameter units
+    r = (10 ** r) * 1e6 * pc  # Distance (meters)
+    m_c = (10 ** m_c) * M_sun  # Combined mass (kg)
 
-    # 确保输入是CuPy数组
+    # Ensure input is CuPy array
     if not isinstance(dataX, cp.ndarray):
         dataX_gpu = cp.asarray(dataX)
     else:
         dataX_gpu = dataX
 
-    # 生成引力波信号
-    t = dataX_gpu  # 时间序列
+    # Generate gravitational wave signal
+    t = dataX_gpu  # Time series
 
-    # 在合并前的有效区域计算信号
+    # Calculate signal in valid region before merger
     valid_idx = t < tc
     t_valid = t[valid_idx]
 
-    # 初始化波形
+    # Initialize waveform
     h = cp.zeros_like(t)
 
-    if cp.sum(valid_idx) > 0:  # 确保有有效区域
-        # 计算频率演化参数 Theta
+    if cp.sum(valid_idx) > 0:  # Ensure there's a valid region
+        # Calculate frequency evolution parameter Theta
         Theta = c ** 3 * (tc - t_valid) / (5 * G * m_c)
 
-        # 计算振幅
+        # Calculate amplitude
         A_gw = (G * m_c / (c ** 2 * r)) * Theta ** (-1 / 4)
 
-        # 计算相位
+        # Calculate phase
         phase = 2 * phi_c - 2 * Theta ** (5 / 8)
 
-        # 生成波形
+        # Generate waveform
         h[valid_idx] = A_gw * cp.cos(phase)
 
     return h
 
 
 def apply_lensing_effect(h, t, A, delta_t, tc):
-    # 计算信号的FFT
+    # Calculate FFT of signal
     n = len(h)
     h_fft = cp.fft.fft(h)
 
-    # 计算频率数组
-    dt = t[1] - t[0]  # 采样间隔
-    fs = 1 / dt  # 采样频率
+    # Calculate frequency array
+    dt = t[1] - t[0]  # Sampling interval
+    fs = 1 / dt  # Sampling frequency
     freqs = cp.fft.fftfreq(n, dt)
 
-    # 计算透镜传递函数 F(f) = 1 + A * exp(i * Phi)
-    # 其中 Phi = 2πf * delta_t
+    # Calculate lens transfer function F(f) = 1 + A * exp(i * Phi)
+    # where Phi = 2πf * delta_t
     Phi = 2 * cp.pi * freqs * delta_t
     lens_transfer = 1 + A * cp.exp(1j * Phi)
 
-    # 在频域中应用透镜效应
+    # Apply lensing effect in frequency domain
     h_lensed_fft = h_fft * lens_transfer
 
-    # 转换回时域
+    # Convert back to time domain
     h_lens = cp.real(cp.fft.ifft(h_lensed_fft))
 
-    # 确保信号在合并时间后为零
+    # Ensure signal is zero after merger time
     h_lens[t > tc] = 0
 
     return h_lens
 
 
 def crcbgenqcsig(dataX, r, m_c, tc, phi_c, A, delta_t, use_lensing=True):
-    # 生成未透镜波形
+    # Generate unlensed waveform
     h = generate_unlensed_gw(dataX, r, m_c, tc, phi_c)
 
-    # 如果需要，应用透镜效应
+    # Apply lensing effect if needed
     if use_lensing:
-        # 确保输入是CuPy数组
+        # Ensure input is CuPy array
         if not isinstance(dataX, cp.ndarray):
             t = cp.asarray(dataX)
         else:
@@ -114,8 +114,32 @@ def crcbgenqcsig(dataX, r, m_c, tc, phi_c, A, delta_t, use_lensing=True):
     return h
 
 
+def pycbc_calculate_match(signal1, signal2, fs, psd):
+    # Ensure data is NumPy arrays
+    if isinstance(signal1, cp.ndarray):
+        signal1 = cp.asnumpy(signal1)
+    if isinstance(signal2, cp.ndarray):
+        signal2 = cp.asnumpy(signal2)
+    if isinstance(psd, cp.ndarray):
+        psd = cp.asnumpy(psd)
+
+    # Create PyCBC TimeSeries objects
+    delta_t = 1.0 / fs
+    ts_signal1 = TimeSeries(signal1, delta_t=delta_t)
+    ts_signal2 = TimeSeries(signal2, delta_t=delta_t)
+
+    # Create PyCBC FrequencySeries object for PSD
+    delta_f = 1.0 / (len(signal1) * delta_t)
+    psd_series = FrequencySeries(psd, delta_f=delta_f)
+
+    # Calculate match using pycbc.filter.match
+    match_value, _ = match(ts_signal1, ts_signal2, psd=psd_series, low_frequency_cutoff=10.0)
+
+    return float(match_value)
+
+
 def two_step_matching(params, dataY, psdHigh, sampFreq):
-    # 提取参数
+    # Extract parameters
     r = params.get('r')
     m_c = params.get('m_c')
     tc = params.get('tc')
@@ -123,74 +147,104 @@ def two_step_matching(params, dataY, psdHigh, sampFreq):
     A = params.get('A')
     delta_t = params.get('delta_t')
     dataX = params.get('dataX')
+    dataY_only_signal = params.get('dataY_only_signal')  # Add this to accept signal-only data
 
-    # 使用未透镜模板
-    unlensed_signal = crcbgenqcsig(dataX, r, m_c, tc, phi_c, A, delta_t, use_lensing=False)
-
-    # 归一化信号
-    unlensed_signal, _ = normsig4psd(unlensed_signal, sampFreq, psdHigh, 1)
-
-    # 计算SNR
-    unlensed_snr = calculate_snr_pycbc(unlensed_signal, psdHigh, sampFreq)
-
-    # 计算失配度
-    unlensed_mismatch = analyze_mismatch(unlensed_signal, dataY, sampFreq, psdHigh)
-
-    # 失配度阈值
-    #
-    threshold = 1.0 /unlensed_snr
-
-    # 初始化结果
+    # Initialize result
     result = {
-        'unlensed_snr': unlensed_snr,
-        'unlensed_mismatch': unlensed_mismatch,
-        'threshold': threshold,
-        'is_lensed': False,
+        'unlensed_signal': None,
+        'unlensed_snr': None,
+        'unlensed_mismatch': None,
         'lensed_signal': None,
         'lensed_snr': None,
         'lensed_mismatch': None,
-        'message': ""
+        'threshold': None,
+        'is_lensed': False,
+        'message': "",
+        'classification': "noise"  # Default classification
     }
 
-    # 如果未透镜模板失配度大于阈值，尝试透镜模板
-    if unlensed_mismatch > threshold:
-        # 使用透镜模板
-        lensed_signal = crcbgenqcsig(dataX, r, m_c, tc, phi_c, A, delta_t, use_lensing=True)
+    # Generate unlensed signal
+    unlensed_signal = crcbgenqcsig(dataX, r, m_c, tc, phi_c, A, delta_t, use_lensing=False)
 
-        # 归一化信号
-        lensed_signal, _ = normsig4psd(lensed_signal, sampFreq, psdHigh, 1)
+    # Normalize signal
+    unlensed_signal, _ = normsig4psd(unlensed_signal, sampFreq, psdHigh, 1)
+    estAmp = innerprodpsd(dataY, unlensed_signal, sampFreq, psdHigh)
+    unlensed_signal = estAmp * unlensed_signal
 
-        # 计算SNR
-        lensed_snr = calculate_snr_pycbc(lensed_signal, psdHigh, sampFreq)
+    # Calculate SNR
+    unlensed_snr = calculate_snr_pycbc(unlensed_signal, psdHigh, sampFreq)
 
-        # 计算失配度
-        lensed_mismatch = analyze_mismatch(lensed_signal, dataY, sampFreq, psdHigh)
+    # Update result with unlensed_signal info
+    result.update({
+        'unlensed_signal': unlensed_signal,
+        'unlensed_snr': unlensed_snr
+    })
 
-        # 更新结果
-        result.update({
-            'lensed_signal': lensed_signal,
-            'lensed_snr': lensed_snr,
-            'lensed_mismatch': lensed_mismatch
-        })
+    # Check if SNR < 8 (noise) - highest priority
+    print("检测是不是噪声")
+    if unlensed_snr < 8:
+        print("ok,是噪声")
+        result['message'] = "This is noise"
+        result['classification'] = "noise"
+        return result
 
-        # 判断是否为透镜波形
-        if lensed_mismatch < threshold:
-            result['is_lensed'] = True
-            result['message'] = "This is a lens signal"
-        else:
-            result['message'] = "该波形大概率是一个透镜化波形"
+    # Calculate mismatch using pycbc.filter.match
+    unlensed_mismatch = 1 - pycbc_calculate_match(unlensed_signal, dataY_only_signal, sampFreq, psdHigh)
+    result['unlensed_mismatch'] = unlensed_mismatch
+
+    # Calculate threshold
+    threshold = 1.0 / unlensed_snr
+    result['threshold'] = threshold
+
+    # If unlensed template matches well, it's an unlensed signal - second priority
+    if unlensed_mismatch >= threshold:
+        print('通过了第一次检测,有信号')
+        result['message'] = "This is a signal"
+        result['classification'] = "signal"
+        return result
+
+    # 进一步检查是否为透镜化模型
+    # Generate lensed signal
+    lensed_signal = crcbgenqcsig(dataX, r, m_c, tc, phi_c, A, delta_t, use_lensing=True)
+
+    # Normalize signal
+    # lensed_signal, _ = normsig4psd(lensed_signal, sampFreq, psdHigh, 1)
+    lensed_signal, _ = normsig4psd(lensed_signal, sampFreq, psdHigh, 1)
+    estAmp = innerprodpsd(dataY, lensed_signal, sampFreq, psdHigh)
+    lensed_signal = estAmp * lensed_signal
+
+    # Calculate SNR
+    lensed_snr = calculate_snr_pycbc(lensed_signal, psdHigh, sampFreq)
+
+    # Calculate mismatch using pycbc.filter.match
+    lensed_mismatch = 1 - pycbc_calculate_match(lensed_signal, dataY_only_signal, sampFreq, psdHigh)
+
+    # Update result
+    result.update({
+        'lensed_signal': lensed_signal,
+        'lensed_snr': lensed_snr,
+        'lensed_mismatch': lensed_mismatch
+    })
+
+    # Double check for lensed signal: mismatch must be less than threshold
+    print('进行第二次检测')
+    if lensed_mismatch <= threshold:
+        print("通过了透镜检测")
         result['is_lensed'] = True
         result['message'] = "This is a lens signal"
+        result['classification'] = "lens_signal"
     else:
-        # 未透镜模板已经足够好匹配了
-        result['message'] = "This is a signal"
+        # Neither unlensed nor lensed matched well - still classify as signal but note it's not a good match
+        print("没通过透镜检测")
+        result['message'] = "This is a signal (signal_mismatch > threshold and len_mismatch < threshold)"
+        result['classification'] = "signal"
 
     return result
 
 
 def crcbqcpsopsd(inParams, psoParams, nRuns, use_two_step=True):
     """
-    对多个PSO运行进行管理的主函数
+    Particle Swarm Optimization main function for multiple runs
     """
     # Transfer data to GPU
     inParams['dataX'] = cp.asarray(inParams['dataX'])
@@ -199,9 +253,15 @@ def crcbqcpsopsd(inParams, psoParams, nRuns, use_two_step=True):
     inParams['rmax'] = cp.asarray(inParams['rmax'])
     inParams['rmin'] = cp.asarray(inParams['rmin'])
 
+    # Add signal-only data if provided
+    if 'dataY_only_signal' in inParams:
+        inParams['dataY_only_signal'] = cp.asarray(inParams['dataY_only_signal'])
+    else:
+        inParams['dataY_only_signal'] = inParams['dataY']  # Use full data if signal-only not provided
+
     nSamples = len(inParams['dataX'])
     nDim = 6
-    # 创建适应度函数句柄
+    # Create fitness function handle
     fHandle = lambda x, returnxVec: glrtqcsig4pso(x, inParams, returnxVec)
 
     outStruct = [{} for _ in range(nRuns)]
@@ -216,19 +276,22 @@ def crcbqcpsopsd(inParams, psoParams, nRuns, use_two_step=True):
         'phi_c': None,
         'A': None,
         'delta_t': None,
+        'is_lensed': False,
+        'lensing_message': "",
+        'classification': None  # Add classification field
     }
 
-    # 运行多次PSO优化，每次使用不同的随机初始种子
+    # Run PSO multiple times with different random seeds
     for lpruns in range(nRuns):
         currentPSOParams = psoParams.copy()
         currentPSOParams['run'] = lpruns + 1
-        # 设置不同的随机种子，确保多次运行结果不同
+        # Set different random seeds to ensure different results in multiple runs
         cp.random.seed(int(time.time()) + lpruns * 1000)
         outStruct[lpruns] = crcbpso(fHandle, nDim, **currentPSOParams)
-        # 打印每次运行的最佳适应度
+        # Print best fitness for each run
         print(f"Run {lpruns + 1} completed with best fitness: {outStruct[lpruns]['bestFitness']}")
 
-    # 处理所有运行的结果
+    # Process results from all runs
     fitVal = cp.zeros(nRuns)
     for lpruns in range(nRuns):
         allRunsOutput = {
@@ -242,33 +305,34 @@ def crcbqcpsopsd(inParams, psoParams, nRuns, use_two_step=True):
             'estSig': cp.zeros(nSamples),
             'totalFuncEvals': [],
             'is_lensed': False,
-            'lensing_message': ""
+            'lensing_message': "",
+            'classification': "noise"  # Default classification
         }
         fitVal[lpruns] = outStruct[lpruns]['bestFitness']
 
-        # 确保维度处理正确
+        # Ensure dimensions are handled correctly
         bestLocation = cp.asarray(outStruct[lpruns]['bestLocation'])
         if bestLocation.ndim == 1:
-            bestLocation = bestLocation.reshape(1, -1)  # 确保2D形状 (1, nDim)
+            bestLocation = bestLocation.reshape(1, -1)  # Ensure 2D shape (1, nDim)
 
-        # 获取最佳位置的参数
+        # Get parameters from best location
         _, params = fHandle(bestLocation, returnxVec=1)
 
-        # 处理参数维度
+        # Handle parameter dimensions
         if isinstance(params, list) and len(params) > 0:
             params = params[0]
         elif isinstance(params, cp.ndarray) and params.ndim > 1 and params.shape[0] == 1:
             params = params[0]
 
-        # 如果需要，转换为numpy
+        # Convert to numpy if needed
         if isinstance(params, cp.ndarray):
             params = cp.asnumpy(params)
 
         r, m_c, tc, phi_c, A, delta_t = params
 
-        # 添加两步匹配流程
+        # Add two-step matching process if requested
         if use_two_step:
-            # 准备参数字典
+            # Prepare parameter dictionary
             param_dict = {
                 'r': r,
                 'm_c': m_c,
@@ -276,10 +340,11 @@ def crcbqcpsopsd(inParams, psoParams, nRuns, use_two_step=True):
                 'phi_c': phi_c,
                 'A': A,
                 'delta_t': delta_t,
-                'dataX': inParams['dataX']
+                'dataX': inParams['dataX'],
+                'dataY_only_signal': inParams['dataY_only_signal']  # Pass signal-only data
             }
 
-            # 执行两步匹配
+            # Execute two-step matching
             matching_result = two_step_matching(
                 param_dict,
                 inParams['dataY'],
@@ -287,31 +352,42 @@ def crcbqcpsopsd(inParams, psoParams, nRuns, use_two_step=True):
                 inParams['sampFreq']
             )
 
-            # 使用匹配结果
+            # Use matching results
             is_lensed = matching_result['is_lensed']
             lensing_message = matching_result['message']
+            classification = matching_result['classification']
 
-            # 根据匹配结果决定使用哪种信号
-            if is_lensed and matching_result['lensed_signal'] is not None:
+            # Decide which signal to use based on classification
+            if classification == "noise":
+                # Use unlensed signal for noise (doesn't matter much since SNR is low)
+                print("是噪声")
+                estSig = matching_result['unlensed_signal']
+            elif classification == "signal":
+                # Use unlensed signal for unlensed signal
+                print("第一判断是未透镜")
+                estSig = matching_result['unlensed_signal']
+            elif classification == "lens_signal":
+                # Use lensed signal for lensed signal
+                print("是透镜")
                 estSig = matching_result['lensed_signal']
             else:
-                # 生成最佳信号（使用原始方法以保持兼容性）
-                estSig = crcbgenqcsig(inParams['dataX'], r, m_c, tc, phi_c, A, delta_t, use_lensing=True)
-                estSig, _ = normsig4psd(estSig, inParams['sampFreq'], inParams['psdHigh'], 1)
-                estAmp = innerprodpsd(inParams['dataY'], estSig, inParams['sampFreq'], inParams['psdHigh'])
-                estSig = estAmp * estSig
+                # Fallback to unlensed signal
+                print("二次判断是未透镜")
+                estSig = matching_result['unlensed_signal']
         else:
-            # 使用原始方法生成信号
+            # Use original method to generate signal
+            print('被迫无奈了？')
             estSig = crcbgenqcsig(inParams['dataX'], r, m_c, tc, phi_c, A, delta_t)
             estSig, _ = normsig4psd(estSig, inParams['sampFreq'], inParams['psdHigh'], 1)
             estAmp = innerprodpsd(inParams['dataY'], estSig, inParams['sampFreq'], inParams['psdHigh'])
             estSig = estAmp * estSig
 
-            # 默认值
+            # Default values
             is_lensed = False
-            lensing_message = "未执行两步匹配"
+            lensing_message = "Two-step matching not performed"
+            classification = "unknown"
 
-        # 更新输出结果
+        # Update output
         allRunsOutput.update({
             'fitVal': float(fitVal[lpruns].get()) if hasattr(fitVal[lpruns], 'get') else float(fitVal[lpruns]),
             'r': r,
@@ -323,11 +399,12 @@ def crcbqcpsopsd(inParams, psoParams, nRuns, use_two_step=True):
             'estSig': cp.asarray(estSig),
             'totalFuncEvals': outStruct[lpruns]['totalFuncEvals'],
             'is_lensed': is_lensed,
-            'lensing_message': lensing_message
+            'lensing_message': lensing_message,
+            'classification': classification
         })
         outResults['allRunsOutput'].append(allRunsOutput)
 
-    # 找出最佳运行
+    # Find best run
     if hasattr(fitVal, 'get'):
         fitVal_np = cp.asnumpy(fitVal)
     else:
@@ -345,156 +422,157 @@ def crcbqcpsopsd(inParams, psoParams, nRuns, use_two_step=True):
         'A': outResults['allRunsOutput'][bestRun]['A'],
         'delta_t': outResults['allRunsOutput'][bestRun]['delta_t'],
         'is_lensed': outResults['allRunsOutput'][bestRun]['is_lensed'],
-        'lensing_message': outResults['allRunsOutput'][bestRun]['lensing_message']
+        'lensing_message': outResults['allRunsOutput'][bestRun]['lensing_message'],
+        'classification': outResults['allRunsOutput'][bestRun]['classification']
     })
     return outResults, outStruct
 
 
 def crcbpso(fitfuncHandle, nDim, **kwargs):
     """
-    完全重写的PSO核心算法实现，增加了早期停止功能
+    Completely rewritten PSO core algorithm implementation with early stopping
     """
-    # 默认PSO参数，实则无意义
+    # Default PSO parameters
     psoParams = {
         'popsize': 200,
         'maxSteps': 2000,
-        'c1': 2.0,  # 个体学习因子
-        'c2': 2.0,  # 社会学习因子
-        'max_velocity': 0.5,  # 最大速度限制
-        'w_start': 0.9,  # 初始惯性权重
-        'w_end': 0.4,  # 最终惯性权重
-        'run': 1,  # 运行序号
-        'nbrhdSz': 4  # 邻域大小
+        'c1': 2.0,  # Individual learning factor
+        'c2': 2.0,  # Social learning factor
+        'max_velocity': 0.5,  # Maximum velocity limit
+        'w_start': 0.9,  # Initial inertia weight
+        'w_end': 0.4,  # Final inertia weight
+        'run': 1,  # Run number
+        'nbrhdSz': 4  # Neighborhood size
     }
-    # 更新参数
+    # Update parameters
     psoParams.update(kwargs)
 
-    # 确保随机数重现性
+    # Ensure random number reproducibility
     if 'seed' in psoParams:
         cp.random.seed(psoParams['seed'])
 
-    # 返回数据结构初始化
+    # Initialize return data structure
     returnData = {
         'totalFuncEvals': 0,
         'bestLocation': cp.zeros((1, nDim)),
         'bestFitness': cp.inf,
-        'fitnessHistory': []  # 记录历史适应度
+        'fitnessHistory': []  # Record fitness history
     }
 
-    # 初始化粒子群
-    particles = cp.random.rand(psoParams['popsize'], nDim)  # 位置：均匀分布在[0,1]之间
-    velocities = cp.random.uniform(-0.1, 0.1, (psoParams['popsize'], nDim))  # 速度：小的随机值
+    # Initialize particle swarm
+    particles = cp.random.rand(psoParams['popsize'], nDim)  # Position: uniform distribution in [0,1]
+    velocities = cp.random.uniform(-0.1, 0.1, (psoParams['popsize'], nDim))  # Velocity: small random values
 
-    # 评估初始适应度
+    # Evaluate initial fitness
     fitness = cp.zeros(psoParams['popsize'])
     for i in range(psoParams['popsize']):
         fitness[i] = fitfuncHandle(particles[i:i + 1], returnxVec=0)
 
-    # 初始化个体最佳和全局最佳
+    # Initialize personal best and global best
     pbest = particles.copy()
     pbest_fitness = fitness.copy()
 
-    # 找出全局最佳
+    # Find global best
     gbest_idx = cp.argmin(pbest_fitness)
     gbest = pbest[gbest_idx].copy()
     gbest_fitness = pbest_fitness[gbest_idx].copy()
 
-    # 记录初始适应度
+    # Record initial fitness
     returnData['fitnessHistory'].append(float(gbest_fitness))
 
-    total_evals = psoParams['popsize']  # 计数器：已评估的适应度次数
+    total_evals = psoParams['popsize']  # Counter: number of fitness evaluations
 
-    # # 早期停止变量初始化
+    # Initialize early stopping variables
     no_improvement_count = 0
     prev_best_fitness = float(gbest_fitness)
-    max_no_improvement = psoParams['maxSteps'] // 2  # 连续超过一半总迭代次数但迭代无改进则停止
+    max_no_improvement = psoParams['maxSteps'] // 2  # Stop if no improvement for half the total iterations
 
-    # 创建进度条
+    # Create progress bar
     with tqdm(range(psoParams['maxSteps']), desc=f'Run {psoParams["run"]}', position=0) as pbar:
         for step in pbar:
-            # 更新惯性权重 - 线性递减
+            # Update inertia weight - linear decrease
             w = psoParams['w_start'] - (psoParams['w_start'] - psoParams['w_end']) * step / psoParams['maxSteps']
 
-            # 更新每个粒子
+            # Update each particle
             for i in range(psoParams['popsize']):
-                # 获取局部最佳（环形拓扑）
+                # Get local best (ring topology)
                 neighbors = []
                 for j in range(psoParams['nbrhdSz']):
                     idx = (i + j) % psoParams['popsize']
                     neighbors.append(idx)
 
-                # 使用numpy的argmin而不是cupy的argmin，因为neighbors是Python列表
+                # Use numpy's argmin instead of cupy's argmin because neighbors is a Python list
                 neighbor_fitness = [float(pbest_fitness[n]) for n in neighbors]
                 best_neighbor_idx = np.argmin(neighbor_fitness)
                 lbest_idx = neighbors[best_neighbor_idx]
                 lbest = pbest[lbest_idx].copy()
 
-                # 生成随机系数
+                # Generate random coefficients
                 r1 = cp.random.rand(nDim)
                 r2 = cp.random.rand(nDim)
 
-                # 更新速度
+                # Update velocity
                 velocities[i] = (w * velocities[i] +
                                  psoParams['c1'] * r1 * (pbest[i] - particles[i]) +
                                  psoParams['c2'] * r2 * (lbest - particles[i]))
 
-                # 限制速度
+                # Limit velocity
                 velocities[i] = cp.clip(velocities[i], -psoParams['max_velocity'], psoParams['max_velocity'])
 
-                # 更新位置
+                # Update position
                 particles[i] += velocities[i]
 
-                # 处理边界约束 - 反射边界
-                # 如果位置超出边界，反弹回来并反转速度方向
+                # Handle boundary constraints - reflective boundary
+                # If position is out of bounds, reflect back and reverse velocity direction
                 out_low = particles[i] < 0
                 out_high = particles[i] > 1
 
                 particles[i] = cp.where(out_low, -particles[i], particles[i])
                 particles[i] = cp.where(out_high, 2 - particles[i], particles[i])
 
-                # 确保位置在[0,1]范围内（防止数值误差）
+                # Ensure position is in [0,1] range (prevent numerical errors)
                 particles[i] = cp.clip(particles[i], 0, 1)
 
-                # 在边界处反转速度
+                # Reverse velocity at boundaries
                 velocities[i] = cp.where(out_low | out_high, -velocities[i], velocities[i])
 
-                # 评估新位置
+                # Evaluate new position
                 new_fitness = fitfuncHandle(particles[i:i + 1], returnxVec=0)
                 fitness[i] = new_fitness
                 total_evals += 1
 
-                # 更新个体最佳
+                # Update personal best
                 if new_fitness < pbest_fitness[i]:
                     pbest[i] = particles[i].copy()
                     pbest_fitness[i] = new_fitness
 
-            # 更新全局最佳
+            # Update global best
             current_best_idx = cp.argmin(pbest_fitness)
             if pbest_fitness[current_best_idx] < gbest_fitness:
                 gbest = pbest[current_best_idx].copy()
                 gbest_fitness = pbest_fitness[current_best_idx].copy()
 
-                # 更新进度条信息
+                # Update progress bar information
                 pbar.set_postfix({'fitness': float(gbest_fitness)})
 
-            # 记录每一步的最佳适应度
+            # Record best fitness at each step
             returnData['fitnessHistory'].append(float(gbest_fitness))
 
-            # # 检查早期停止条件
+            # Check early stopping condition
             current_best_fitness = float(gbest_fitness)
-            if abs(current_best_fitness - prev_best_fitness) < 1e-10:  # 考虑浮点误差
+            if abs(current_best_fitness - prev_best_fitness) < 1e-10:  # Consider floating point errors
                 no_improvement_count += 1
             else:
                 no_improvement_count = 0
                 prev_best_fitness = current_best_fitness
 
-            # 如果连续半数迭代的迭代结果无改进，则提前终止
+            # Stop early if no improvement for half the iterations
             if no_improvement_count >= max_no_improvement:
                 print(
                     f"Run {psoParams['run']} stopped early after {step + 1} iterations: No improvement for {max_no_improvement} iterations")
                 break
 
-    # 完成后更新返回数据
+    # Update return data when finished
     returnData.update({
         'totalFuncEvals': total_evals,
         'bestLocation': cp.asnumpy(gbest.reshape(1, -1)),
@@ -506,27 +584,27 @@ def crcbpso(fitfuncHandle, nDim, **kwargs):
 
 def glrtqcsig4pso(xVec, params, returnxVec=0):
     """
-    改进的适应度函数计算
+    Improved fitness function calculation
     """
-    # 确保输入是CuPy数组
+    # Ensure input is CuPy array
     if isinstance(xVec, np.ndarray):
         xVec = cp.asarray(xVec)
 
-    # 确保输入维度正确
+    # Ensure input dimensions are correct
     if xVec.ndim == 1:
         xVec = xVec.reshape(1, -1)
 
-    # 检查参数是否在有效范围内
+    # Check if parameters are in valid range
     validPts = crcbchkstdsrchrng(xVec)
     nPoints = xVec.shape[0]
 
-    # 初始化适应度数组
+    # Initialize fitness array
     fitVal = cp.full(nPoints, cp.inf)
 
-    # 将标准范围[0,1]转换为实际参数范围
+    # Convert standard range [0,1] to actual parameter range
     xVecReal = s2rv(xVec, params)
 
-    # 计算每个有效点的适应度
+    # Calculate fitness for each valid point
     for i in range(nPoints):
         if validPts[i]:
             fitVal[i] = ssrqc(xVecReal[i], params)
@@ -539,70 +617,69 @@ def glrtqcsig4pso(xVec, params, returnxVec=0):
 
 def ssrqc(x, params):
     """
-    计算信号的自匹配最佳信噪比
+    Calculate optimal SNR for signal self-match
     """
-    # 生成信号
+    # Generate signal
     qc = crcbgenqcsig(params['dataX'], x[0], x[1], x[2], x[3], x[4], x[5])
 
-    # 归一化信号
+    # Normalize signal
     qc, _ = normsig4psd(qc, params['sampFreq'], params['psdHigh'], 1)
 
-    # 计算内积（投影）
+    # Calculate inner product (projection)
     inPrd = innerprodpsd(params['dataY'], qc, params['sampFreq'], params['psdHigh'])
-    # inPrd = calculate_snr_pycbc(qc,params['psdHigh'],params['sampFreq'])
-    # 返回负的平方内积（最小化问题）
+
+    # Return negative squared inner product (minimization problem)
     return -cp.abs(inPrd) ** 2
-    # return inPrd
 
 
 def normsig4psd(sigVec, sampFreq, psdVec, snr):
     """
-    根据PSD归一化信号
+    Normalize signal according to PSD
     """
     nSamples = len(sigVec)
 
-    # 构建完整的PSD向量（正负频率）
-    if psdVec.shape[0] > 1:  # 确保有多于一个元素
+    # Build complete PSD vector (positive and negative frequencies)
+    if psdVec.shape[0] > 1:  # Ensure there's more than one element
         psdVec4Norm = cp.concatenate([psdVec, psdVec[-2:0:-1]])
     else:
-        # 处理特殊情况
+        # Handle special case
         psdVec4Norm = cp.zeros(nSamples)
         psdVec4Norm[0] = psdVec[0]
 
-    # 计算信号的归一化因子
+    # Calculate normalization factor for signal
     fft_sig = cp.fft.fft(sigVec)
 
-    # 计算归一化平方和
+    # Calculate normalized squared sum
     normSigSqrd = cp.sum((cp.abs(fft_sig) ** 2) / psdVec4Norm) / (sampFreq * nSamples)
 
-    # 计算归一化因子
-    normFac = snr / cp.sqrt(cp.abs(normSigSqrd))  # 使用绝对值避免复数问题
+    # Calculate normalization factor
+    normFac = snr / cp.sqrt(cp.abs(normSigSqrd))  # Use absolute value to avoid complex number issues
 
     return normFac * sigVec, normFac
 
 
 def innerprodpsd(xVec, yVec, sampFreq, psdVals):
     """
-    计算考虑PSD的内积
+    Calculate inner product considering PSD
     """
-    # 确保输入向量长度一致
+    # Ensure input vectors have consistent length
     if len(xVec) != len(yVec):
-        # 调整长度使其匹配
+        # Adjust length to match
         min_len = min(len(xVec), len(yVec))
         xVec = xVec[:min_len]
         yVec = yVec[:min_len]
 
     nSamples = len(xVec)
 
-    # 构建完整的PSD向量
-    if psdVals.shape[0] > 1:  # 确保有多于一个元素
+    # Build complete PSD vector
+    if psdVals.shape[0] > 1:  # Ensure there's more than one element
         psdVec4Norm = cp.concatenate([psdVals, psdVals[-2:0:-1]])
     else:
-        # 处理特殊情况
+        # Handle special case
         psdVec4Norm = cp.zeros(nSamples)
         psdVec4Norm[0] = psdVals[0]
 
-    # 确保长度匹配
+    # Ensure length matches
     if len(psdVec4Norm) != nSamples:
         if len(psdVec4Norm) > nSamples:
             psdVec4Norm = psdVec4Norm[:nSamples]
@@ -610,20 +687,20 @@ def innerprodpsd(xVec, yVec, sampFreq, psdVals):
             psdVec4Norm = cp.pad(psdVec4Norm, (0, nSamples - len(psdVec4Norm)), 'constant',
                                  constant_values=psdVec4Norm[-1])
 
-    # 计算FFT
+    # Calculate FFT
     fftX = cp.fft.fft(xVec)
     fftY = cp.fft.fft(yVec)
 
-    # 计算内积
+    # Calculate inner product
     inner_product = cp.sum((fftX * cp.conj(fftY)) / psdVec4Norm) / (sampFreq * nSamples)
 
-    # 返回实部
+    # Return real part
     return cp.real(inner_product)
 
 
 def s2rv(xVec, params):
     """
-    将标准范围 [0,1] 的参数转换到实际范围
+    Convert parameters from standard range [0,1] to actual range
     """
     rmax = cp.asarray(params['rmax'])
     rmin = cp.asarray(params['rmin'])
@@ -632,49 +709,49 @@ def s2rv(xVec, params):
 
 def crcbchkstdsrchrng(xVec):
     """
-    检查粒子是否在标准范围 [0,1] 内
+    Check if particles are within standard range [0,1]
     """
     if not isinstance(xVec, cp.ndarray):
         xVec = cp.asarray(xVec)
 
-    # 检查每行中的所有元素是否都在[0,1]范围内
+    # Check if all elements in each row are within [0,1] range
     return cp.all((xVec >= 0) & (xVec <= 1), axis=1)
 
 
 def calculate_snr_pycbc(signal, psd, fs):
-    # 确保数据是NumPy数组
+    """
+    Calculate SNR using PyCBC
+    """
+    # Ensure data is NumPy array
     if isinstance(signal, cp.ndarray):
         signal = cp.asnumpy(signal)
     if isinstance(psd, cp.ndarray):
         psd = cp.asnumpy(psd)
 
-    # 创建PyCBC的TimeSeries对象
+    # Create PyCBC TimeSeries object
     delta_t = 1.0 / fs
     ts_signal = TimeSeries(signal, delta_t=delta_t)
 
-    # 创建PyCBC的FrequencySeries对象
+    # Create PyCBC FrequencySeries object
     delta_f = 1.0 / (len(signal) * delta_t)
-
     psd_series = FrequencySeries(psd, delta_f=delta_f)
 
-    # 使用matched_filter计算SNR
+    # Calculate SNR using matched_filter
     snr = pycbc.filter.matched_filter(ts_signal, ts_signal, psd=psd_series, low_frequency_cutoff=10.0)
 
-    # 获取最大SNR值
+    # Get maximum SNR value
     max_snr = abs(snr).max()
 
     return float(max_snr)
 
 
 def analyze_mismatch(data, h_lens, samples, psdHigh):
-    # Convert inputs to CuPy arrays
-    data_cupy = cp.asarray(data)
-    h_lens_cupy = cp.asarray(h_lens)
+    """
+    Calculate mismatch using PyCBC match function
+    """
+    # Use PyCBC match function for more accurate mismatch calculation
+    match_value = pycbc_calculate_match(h_lens, data, samples, psdHigh)
 
-    match_value = (innerprodpsd(h_lens_cupy, data_cupy, samples, psdHigh) /
-                   np.sqrt(innerprodpsd(h_lens_cupy, h_lens_cupy, samples, psdHigh) *
-                           innerprodpsd(data_cupy, data_cupy, samples, psdHigh)))
-
-    # Calculate mismatch
+    # Calculate mismatch as 1 - match
     epsilon = 1 - match_value
     return epsilon
