@@ -1,4 +1,5 @@
 import cupy as cp
+from cupyx.scipy.fftpack import fft
 from pycbc.types import FrequencySeries, TimeSeries
 from tqdm import tqdm
 import numpy as np
@@ -27,6 +28,7 @@ __all__ = [
     'crcbchkstdsrchrng',
     'calculate_snr_pycbc',
     'analyze_mismatch',
+    # 'classify_signal',
     'two_step_matching'
 ]
 
@@ -131,25 +133,12 @@ def two_step_matching(params, dataY, psdHigh, sampFreq):
     # 计算SNR
     unlensed_snr = calculate_snr_pycbc(unlensed_signal, psdHigh, sampFreq)
 
-    # 新增: 如果SNR小于8，直接判断为噪声
-    if unlensed_snr < 8:
-        return {
-            'unlensed_snr': unlensed_snr,
-            'unlensed_mismatch': None,
-            'threshold': None,
-            'is_lensed': False,
-            'is_noise': True,  # 新增标志
-            'lensed_signal': None,
-            'lensed_snr': None,
-            'lensed_mismatch': None,
-            'message': "This is noise (SNR < 8)"
-        }
-
     # 计算失配度
     unlensed_mismatch = analyze_mismatch(unlensed_signal, dataY, sampFreq, psdHigh)
 
     # 失配度阈值
-    threshold = 1.0 / unlensed_snr
+    #
+    threshold = 1.0 /unlensed_snr
 
     # 初始化结果
     result = {
@@ -157,7 +146,6 @@ def two_step_matching(params, dataY, psdHigh, sampFreq):
         'unlensed_mismatch': unlensed_mismatch,
         'threshold': threshold,
         'is_lensed': False,
-        'is_noise': False,  # 新增标志
         'lensed_signal': None,
         'lensed_snr': None,
         'lensed_mismatch': None,
@@ -185,10 +173,16 @@ def two_step_matching(params, dataY, psdHigh, sampFreq):
             'lensed_mismatch': lensed_mismatch
         })
 
+        # 判断是否为透镜波形
+        if lensed_mismatch < threshold:
+            result['is_lensed'] = True
+            result['message'] = "This is a lens signal"
+        else:
+            result['message'] = "该波形大概率是一个透镜化波形"
         result['is_lensed'] = True
         result['message'] = "This is a lens signal"
     else:
-        # 未透镜模板已经足够匹配
+        # 未透镜模板已经足够好匹配了
         result['message'] = "This is a signal"
 
     return result
@@ -222,7 +216,6 @@ def crcbqcpsopsd(inParams, psoParams, nRuns, use_two_step=True):
         'phi_c': None,
         'A': None,
         'delta_t': None,
-        'is_noise': False  # 新增标志
     }
 
     # 运行多次PSO优化，每次使用不同的随机初始种子
@@ -249,7 +242,6 @@ def crcbqcpsopsd(inParams, psoParams, nRuns, use_two_step=True):
             'estSig': cp.zeros(nSamples),
             'totalFuncEvals': [],
             'is_lensed': False,
-            'is_noise': False,  # 新增标志
             'lensing_message': ""
         }
         fitVal[lpruns] = outStruct[lpruns]['bestFitness']
@@ -297,20 +289,14 @@ def crcbqcpsopsd(inParams, psoParams, nRuns, use_two_step=True):
 
             # 使用匹配结果
             is_lensed = matching_result['is_lensed']
-            is_noise = matching_result.get('is_noise', False)  # 获取是否为噪声的标志，如果不存在则默认为False
             lensing_message = matching_result['message']
 
             # 根据匹配结果决定使用哪种信号
-            if is_noise:
-                # 如果是噪声，仍然使用估计的信号，但标记为噪声
-                estSig = unlensed_signal = crcbgenqcsig(inParams['dataX'], r, m_c, tc, phi_c, A, delta_t,
-                                                        use_lensing=False)
-                estSig, _ = normsig4psd(estSig, inParams['sampFreq'], inParams['psdHigh'], 1)
-            elif is_lensed and matching_result['lensed_signal'] is not None:
+            if is_lensed and matching_result['lensed_signal'] is not None:
                 estSig = matching_result['lensed_signal']
             else:
                 # 生成最佳信号（使用原始方法以保持兼容性）
-                estSig = crcbgenqcsig(inParams['dataX'], r, m_c, tc, phi_c, A, delta_t, use_lensing=False)
+                estSig = crcbgenqcsig(inParams['dataX'], r, m_c, tc, phi_c, A, delta_t, use_lensing=True)
                 estSig, _ = normsig4psd(estSig, inParams['sampFreq'], inParams['psdHigh'], 1)
                 estAmp = innerprodpsd(inParams['dataY'], estSig, inParams['sampFreq'], inParams['psdHigh'])
                 estSig = estAmp * estSig
@@ -323,7 +309,6 @@ def crcbqcpsopsd(inParams, psoParams, nRuns, use_two_step=True):
 
             # 默认值
             is_lensed = False
-            is_noise = False
             lensing_message = "未执行两步匹配"
 
         # 更新输出结果
@@ -338,7 +323,6 @@ def crcbqcpsopsd(inParams, psoParams, nRuns, use_two_step=True):
             'estSig': cp.asarray(estSig),
             'totalFuncEvals': outStruct[lpruns]['totalFuncEvals'],
             'is_lensed': is_lensed,
-            'is_noise': is_noise,  # 更新噪声标志
             'lensing_message': lensing_message
         })
         outResults['allRunsOutput'].append(allRunsOutput)
@@ -361,7 +345,6 @@ def crcbqcpsopsd(inParams, psoParams, nRuns, use_two_step=True):
         'A': outResults['allRunsOutput'][bestRun]['A'],
         'delta_t': outResults['allRunsOutput'][bestRun]['delta_t'],
         'is_lensed': outResults['allRunsOutput'][bestRun]['is_lensed'],
-        'is_noise': outResults['allRunsOutput'][bestRun]['is_noise'],  # 更新噪声标志
         'lensing_message': outResults['allRunsOutput'][bestRun]['lensing_message']
     })
     return outResults, outStruct
