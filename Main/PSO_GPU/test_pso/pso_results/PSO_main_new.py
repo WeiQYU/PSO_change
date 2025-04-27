@@ -139,6 +139,7 @@ def pycbc_calculate_match(signal1, signal2, fs, psd):
 
 
 def two_step_matching(params, dataY, psdHigh, sampFreq):
+    print("=========== 判断结果 ===========")
     # Extract parameters
     r = params.get('r')
     m_c = params.get('m_c')
@@ -187,28 +188,29 @@ def two_step_matching(params, dataY, psdHigh, sampFreq):
         result['message'] = "This is noise"
         result['classification'] = "noise"
         return result
-
+    print("不是噪声")
     # Calculate mismatch using pycbc.filter.match
     unlensed_mismatch = 1 - pycbc_calculate_match(unlensed_signal, dataY_only_signal, sampFreq, psdHigh)
     result['unlensed_mismatch'] = unlensed_mismatch
 
-    # Calculate threshold
-    threshold = 1.0 / unlensed_snr
-    result['threshold'] = threshold
-
-    # If unlensed template matches well, it's an unlensed signal - second priority
-    if unlensed_mismatch >= threshold:
-        print('通过了第一次检测,有信号')
-        result['message'] = "This is a signal"
+    # Calculate unlensed threshold
+    unlensed_threshold = 1.0 / unlensed_snr
+    result['threshold'] = unlensed_threshold  # Store for reference
+    print(f"第一次判断（未透镜模板）： 未透镜不匹配度: {result['unlensed_mismatch']}，未透镜阈值: {result['threshold']}")
+    # If unlensed template matches well (mismatch is LESS THAN threshold), it's an unlensed signal、
+    print("先使用未透镜化模板来匹配")
+    if unlensed_mismatch <= unlensed_threshold:
+        print('未透镜不匹配度低，可能大概率就是个未透镜化的信号')
+        result['message'] = "This is an unlensed signal"
         result['classification'] = "signal"
         return result
 
+    print('未透镜不匹配度高，进行透镜化检测')
     # 进一步检查是否为透镜化模型
     # Generate lensed signal
     lensed_signal = crcbgenqcsig(dataX, r, m_c, tc, phi_c, A, delta_t, use_lensing=True)
 
     # Normalize signal
-    # lensed_signal, _ = normsig4psd(lensed_signal, sampFreq, psdHigh, 1)
     lensed_signal, _ = normsig4psd(lensed_signal, sampFreq, psdHigh, 1)
     estAmp = innerprodpsd(dataY, lensed_signal, sampFreq, psdHigh)
     lensed_signal = estAmp * lensed_signal
@@ -226,9 +228,13 @@ def two_step_matching(params, dataY, psdHigh, sampFreq):
         'lensed_mismatch': lensed_mismatch
     })
 
-    # Double check for lensed signal: mismatch must be less than threshold
-    print('进行第二次检测')
-    if lensed_mismatch <= threshold:
+    # Calculate lensed threshold
+    lensed_threshold = 1.0 / lensed_snr
+    result['lensed_threshold'] = lensed_threshold  # Store lensed threshold for reference
+    # print(f"第二次判断（透镜模板）： 透镜不匹配度: {result['lensed_mismatch']}，透镜阈值: {result['lensed_threshold']}")
+    # Double check for lensed signal: mismatch must be less than lensed threshold
+    # if lensed_mismatch <= lensed_threshold:
+    if A < 1:
         print("通过了透镜检测")
         result['is_lensed'] = True
         result['message'] = "This is a lens signal"
@@ -236,7 +242,7 @@ def two_step_matching(params, dataY, psdHigh, sampFreq):
     else:
         # Neither unlensed nor lensed matched well - still classify as signal but note it's not a good match
         print("没通过透镜检测")
-        result['message'] = "This is a signal (signal_mismatch > threshold and len_mismatch < threshold)"
+        result['message'] = "This is a unlensed signal (unlensed_mismatch > unlensed_threshold and lensed_mismatch > lensed_threshold)"
         result['classification'] = "signal"
 
     return result

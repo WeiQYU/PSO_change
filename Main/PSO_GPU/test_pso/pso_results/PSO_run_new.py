@@ -27,7 +27,7 @@ Fs = float(analysisData['samples'][0][0])
 # Search range parameters
 #                r  mc tc phi A  Δtd
 rmin = cp.array([-2, 0, 0, 0, 0, 0])  # parameter range lower bounds
-rmax = cp.array([4, 3, 8, 2 * np.pi, 1, 7])  # parameter range upper bounds
+rmax = cp.array([4, 3, 8, 2 * np.pi, 2, 7])  # parameter range upper bounds
 # Time domain settings
 dt = 1 / Fs  # sampling rate Hz
 t = cp.arange(0, 8, dt)  # Using CuPy for t array
@@ -49,12 +49,12 @@ inParams = {
 }
 
 # Number of PSO runs
-nRuns = 1
+nRuns = 8
 
 # PSO configuration parameters
 pso_config = {
-    'popsize': 80,  # Population size
-    'maxSteps': 100,  # Number of iterations
+    'popsize': 50,  # Population size
+    'maxSteps': 3000,  # Number of iterations
     'c1': 2,  # Individual learning factor
     'c2': 2,  # Social learning factor
     'w_start': 0.9,  # Initial inertia weight
