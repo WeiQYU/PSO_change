@@ -236,7 +236,7 @@ def pycbc_calculate_match(signal1, signal2, fs, psd):
 def two_step_matching(params, dataY, psdHigh, sampFreq, actual_params=None):
     """
     Enhanced two-step matching process to classify gravitational wave signals
-    based on the value of A. A < 1 indicates lensed signal, A > 1 indicates
+    based on the value of A. A < 1 indicates lensed signal, A >= 1 indicates
     unlensed signal.
 
     Parameters:
@@ -348,7 +348,7 @@ def two_step_matching(params, dataY, psdHigh, sampFreq, actual_params=None):
     result['model_comparison'] = model_comparison
 
     # Classification based solely on the value of A
-    # A < 1 indicates lensed signal, A > 1 indicates unlensed signal
+    # A < 1 indicates lensed signal, A >= 1 indicates unlensed signal
     if A < 1:
         result['is_lensed'] = True
         result['message'] = f"This is a lens signal (A = {A:.6f} < 1)"
@@ -369,7 +369,7 @@ def two_step_matching(params, dataY, psdHigh, sampFreq, actual_params=None):
         param_errors = {
             'r_error': (10 ** r - 10 ** actual_r_log10) / 10 ** actual_r_log10 if actual_r_log10 > 0 else float('inf'),
             'm_c_error': (
-                                     10 ** m_c - 10 ** actual_m_c_log10) / 10 ** actual_m_c_log10 if actual_m_c_log10 > 0 else float(
+                                 10 ** m_c - 10 ** actual_m_c_log10) / 10 ** actual_m_c_log10 if actual_m_c_log10 > 0 else float(
                 'inf'),
             'tc_error': (tc - actual_params.get('merger_time', 0)) / actual_params.get('merger_time', 1),
             'phi_c_error': min(abs(phi_c - actual_params.get('phase', 0) * 2 * cp.pi),
@@ -805,9 +805,6 @@ def crcbqcpsopsd(inParams, psoParams, nRuns, use_two_step=True, actual_params=No
             lensing_message = matching_result['message']
             classification = matching_result['classification']
 
-            # Update use_lensing parameter for future runs based on classification
-            inParams['use_lensing'] = is_lensed
-
             # Decide which signal to use based on classification
             if classification == "noise":
                 print("是噪声")
@@ -832,17 +829,24 @@ def crcbqcpsopsd(inParams, psoParams, nRuns, use_two_step=True, actual_params=No
         else:
             # Use original method to generate signal
             print('未使用两步匹配过程')
-            use_lensing = inParams.get('use_lensing', False)  # Default to unlensed
+            # IMPORTANT: Use lensing flag based on A value
+            is_lensed = A < 1
+            use_lensing = is_lensed
+
             estSig = crcbgenqcsig(inParams['dataX'], r, m_c, tc, phi_c, A, delta_t, use_lensing=use_lensing)
             estSig, _ = normsig4psd(estSig, inParams['sampFreq'], inParams['psdHigh'], 1)
             # 使用纯信号而不是带噪声的数据进行匹配
             estAmp = innerprodpsd(inParams['dataY_only_signal'], estSig, inParams['sampFreq'], inParams['psdHigh'])
             estSig = estAmp * estSig
 
-            # Default values
-            is_lensed = False
-            lensing_message = "Two-step matching not performed"
-            classification = "unknown"
+            # Generate classification message
+            if is_lensed:
+                lensing_message = f"This is a lens signal (A = {A:.6f} < 1)"
+                classification = "lens_signal"
+            else:
+                lensing_message = f"This is an unlensed signal (A = {A:.6f} >= 1)"
+                classification = "signal"
+
             model_comparison = {}
             param_errors = {}
             actual_comparison = {}
@@ -1581,10 +1585,12 @@ def ssrqc(x, params):
     fitness : float
         Negative matched filtering result
     """
-    # Get the use_lensing flag based on previous classification
-    use_lensing = params.get('use_lensing', False)  # Default to unlensed model
+    # IMPORTANT: Determine lensing usage based on A parameter value
+    # If A < 1, the signal should be lensed; if A >= 1, the signal should be unlensed
+    A = x[4]  # The A parameter
+    use_lensing = A < 1
 
-    # Generate signal based on whether to use lensing or not
+    # Generate signal based on the A parameter value
     qc = crcbgenqcsig(params['dataX'], x[0], x[1], x[2], x[3], x[4], x[5], use_lensing=use_lensing)
 
     # Normalize signal
@@ -1617,8 +1623,10 @@ def bayesian_ssrqc(x, params):
     fitness : float
         Negative log posterior (likelihood * prior)
     """
-    # Get the use_lensing flag based on previous classification
-    use_lensing = params.get('use_lensing', False)  # Default to unlensed model
+    # IMPORTANT: Determine lensing usage based on A parameter value
+    # If A < 1, the signal should be lensed; if A >= 1, the signal should be unlensed
+    A = x[4]  # The A parameter
+    use_lensing = A < 1
 
     # Generate signal based on whether to use lensing or not
     qc = crcbgenqcsig(params['dataX'], x[0], x[1], x[2], x[3], x[4], x[5], use_lensing=use_lensing)
@@ -1698,17 +1706,8 @@ def calculate_log_prior(x, params):
 
     # Phase prior - uniform over [0, 2π] (no contribution to log prior)
 
-    # Flux ratio (A) prior - Physically motivated to favor smaller values
-    # For lensed gravitational waves, flux ratio is typically < 1
-    if A <= 1.0:
-        # Higher probability for A <= 1
-        log_prior += cp.log(2.0)  # Twice the probability compared to A > 1
-
-    # Time delay prior - physically motivated for typical lensing
-    # Favor delay times in physically plausible range
-    if 0.2 <= delta_t <= 2.0:
-        # Higher probability for reasonable delay times
-        log_prior += 0.5  # Small bonus for reasonable delay times
+    # REMOVED: Flux ratio (A) and time delay (delta_t) priors
+    # No special priors for A and delta_t to avoid biasing toward lensed solutions
 
     return log_prior
 
@@ -1898,7 +1897,7 @@ def innerprodpsd(xVec, yVec, sampFreq, psdVals):
         psdVec4Norm[:nSamples // 2 + 1] = psdVals[:nSamples // 2 + 1]  # 正频率
         psdVec4Norm[nSamples // 2 + 1:] = psdVals[1:nSamples // 2][::-1]  # 负频率（镜像）
     else:
-        # 处理单值PSD的特殊情况
+# 处理单值PSD的特殊情况
         psdVec4Norm = cp.ones(nSamples) * psdVals[0]
 
     # 确保PSD没有零值（避免除以零）

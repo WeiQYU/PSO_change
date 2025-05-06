@@ -27,8 +27,8 @@ nSamples = dataY.size
 Fs = float(analysisData['samples'][0][0])
 
 #                r    mc   tc   phi    A      Δtd
-rmin = cp.array([-2, 0, 0.1, 0, 0.01, 0.1])
-rmax = cp.array([4, 2, 8.0, np.pi, 2.0, 4.0])  # Changed A upper limit to 2.0
+rmin = cp.array([-2, 0, 1, 0, 0, 0])
+rmax = cp.array([4, 2, 8.0, np.pi, 1.0, 4.0])  # Changed A upper limit to 2.0
 
 # Time domain settings
 dt = 1 / Fs  # sampling rate Hz
@@ -62,7 +62,7 @@ nRuns = 8
 
 # PSO配置参数
 pso_config = {
-    'popsize': 80,  # 增加粒子数量以确保每个维度有足够的覆盖
+    'popsize': 100,  # 增加粒子数量以确保每个维度有足够的覆盖
     'maxSteps': 3000,  # 迭代次数
     'c1': 2.0,  # 个体学习因子
     'c2': 2.0,  # 社会学习因子
@@ -259,11 +259,9 @@ best_run_number = outResults['bestRun'] + 1
 ax.plot(t_cpu, best_sig, 'red', lw=2.0,
         label=f'Best Fit (Run {best_run_number}, {best_classification}, SNR={best_snr:.1f})')
 
-
 # 计算相关系数并添加到图表
 def correlation_coefficient(x, y):
     return np.corrcoef(x, y)[0, 1]
-
 
 corr_coef = correlation_coefficient(dataY_only_signal_np, best_sig)
 title = f'All PSO Runs Comparison (Best Run {best_run_number}, Correlation: {corr_coef:.4f})'
@@ -392,63 +390,6 @@ if 'strategy_shifts' in outResults:
         print(f"  Fitness improvement: {shift.get('fitness_improvement', 'N/A')}")
         print(f"  Reason: {shift.get('reason', 'N/A')}")
 
-# 添加透镜与非透镜模型的详细比较
-is_lensed = outResults['is_lensed']
-best_A = float(outResults['allRunsOutput'][best_run_idx]['A'])
-if isinstance(best_A, cp.ndarray):
-    best_A = float(best_A.get())
-print(f"模型分类: {'Lensed' if is_lensed else 'Unlensed'}, A值: {best_A:.4f}")
-
-# 该运行是否使用透镜效应生成最终信号
-if outResults['allRunsOutput'][best_run_idx]['is_lensed']:
-    print("\n============= Lensed vs Unlensed Model Comparison =============")
-    best_result = outResults['allRunsOutput'][best_run_idx]
-    params_dict = {
-        'r': float(best_result['r']),
-        'm_c': float(best_result['m_c']),
-        'tc': float(best_result['tc']),
-        'phi_c': float(best_result['phi_c']),
-        'A': float(best_result['A']),
-        'delta_t': float(best_result['delta_t']),
-        'dataX': inParams['dataX'],
-        'dataY_only_signal': inParams['dataY_only_signal']
-    }
-
-    # 生成两种模型进行比较
-    unlensed_sig = crcbgenqcsig(inParams['dataX'], params_dict['r'], params_dict['m_c'],
-                                params_dict['tc'], params_dict['phi_c'],
-                                params_dict['A'], params_dict['delta_t'], use_lensing=False)
-    lensed_sig = crcbgenqcsig(inParams['dataX'], params_dict['r'], params_dict['m_c'],
-                              params_dict['tc'], params_dict['phi_c'],
-                              params_dict['A'], params_dict['delta_t'], use_lensing=True)
-
-    # 归一化信号
-    unlensed_sig, _ = normsig4psd(unlensed_sig, Fs, psdHigh, 1)
-    lensed_sig, _ = normsig4psd(lensed_sig, Fs, psdHigh, 1)
-
-    # 计算与实际信号的相关性
-    unlensed_corr = correlation_coefficient(
-        cp.asnumpy(cp.real(dataY_only_signal)),
-        cp.asnumpy(cp.real(unlensed_sig))
-    )
-    lensed_corr = correlation_coefficient(
-        cp.asnumpy(cp.real(dataY_only_signal)),
-        cp.asnumpy(cp.real(lensed_sig))
-    )
-
-    print(f"Unlensed model correlation: {unlensed_corr:.4f}")
-    print(f"Lensed model correlation: {lensed_corr:.4f}")
-    print(f"Correlation improvement: {(lensed_corr - unlensed_corr):.4f}")
-
-# 如果有模型比较指标，打印详细比较
-if 'model_comparison' in outResults and outResults['model_comparison']:
-    model_comp = outResults['model_comparison']
-    print("\n============= Lensed vs Unlensed Model Metrics =============")
-    print(f"SNR Difference (Lensed - Unlensed): {float(model_comp.get('snr_difference', 0)):.4f}")
-    print(f"Mismatch Difference (Unlensed - Lensed): {float(model_comp.get('mismatch_difference', 0)):.6f}")
-    print(f"SNR Ratio (Lensed/Unlensed): {float(model_comp.get('snr_ratio', 1)):.4f}")
-    print(f"Mismatch Ratio (Unlensed/Lensed): {float(model_comp.get('mismatch_ratio', 1)):.4f}")
-
 # 最终比较图 - 转换为CPU进行绘图
 bestData_cpu = cp.asnumpy(cp.real(dataY))
 bestSig_cpu = cp.asnumpy(cp.real(outResults['bestSig']))
@@ -481,167 +422,6 @@ ax2.set_title(f'Residual Analysis (Correlation: {best_corr:.4f}, SNR: {best_snr_
 plt.tight_layout()
 plt.savefig('signal_comparison_plot.png')
 plt.close()
-
-# 绘制参数误差比较
-if 'param_errors' in outResults and outResults['param_errors']:
-    error_labels = ['r_error', 'm_c_error', 'tc_error', 'phi_c_error', 'A_error', 'delta_t_error']
-
-    # 确保所有值都是Python浮点数，而不是CuPy数组
-    error_values = []
-    for label in error_labels:
-        value = outResults['param_errors'].get(label, 0)
-        if isinstance(value, cp.ndarray):
-            value = float(value.get())  # 显式转换CuPy数组为float
-        error_values.append(abs(value) * 100)  # 转换为百分比
-
-    plt.figure(figsize=(12, 6), dpi=200)
-    bars = plt.bar(error_labels, error_values, color='orange')
-
-    # 添加数值标签
-    for bar in bars:
-        height = bar.get_height()
-        plt.text(bar.get_x() + bar.get_width() / 2., height + 0.5,
-                 f'{height:.1f}%', ha='center', va='bottom')
-
-    plt.ylabel('Relative Error (%)')
-    plt.xlabel('Parameter')
-    title = 'Parameter Estimation Errors vs Actual Values'
-    if balanced_pso:
-        title = f'Balanced Dimension PSO: {title}'
-    if use_bayesian:
-        title = f'Bayesian Approach: {title}'
-    plt.title(title)
-    plt.xticks(rotation=45)
-    plt.tight_layout()
-    plt.savefig('parameter_errors.png')
-    plt.close()
-
-# 添加模型比较可视化
-if 'model_comparison' in outResults:
-    # 创建模型比较图
-    fig, ax = plt.subplots(figsize=(10, 6), dpi=200)
-
-
-    # 确保所有值都是Python浮点数
-    def ensure_float(value):
-        if isinstance(value, cp.ndarray):
-            return float(value.get())
-        return float(value)
-
-
-    # 准备数据
-    unlensed_snr = ensure_float(
-        outResults.get('unlensed_snr', outResults['allRunsOutput'][best_run_idx].get('unlensed_snr', 0)))
-    lensed_snr = ensure_float(
-        outResults.get('lensed_snr', outResults['allRunsOutput'][best_run_idx].get('lensed_snr', 0)))
-    unlensed_mismatch = ensure_float(outResults.get('unlensed_mismatch',
-                                                    outResults['allRunsOutput'][best_run_idx].get('unlensed_mismatch',
-                                                                                                  0))) * 100  # 转换为百分比
-    lensed_mismatch = ensure_float(outResults.get('lensed_mismatch',
-                                                  outResults['allRunsOutput'][best_run_idx].get('lensed_mismatch',
-                                                                                                0))) * 100  # 转换为百分比
-
-    # 准备条形图数据
-    metrics = ['SNR (Unlensed)', 'SNR (Lensed)', 'Mismatch (Unlensed) %', 'Mismatch (Lensed) %']
-    values = [unlensed_snr, lensed_snr, unlensed_mismatch, lensed_mismatch]
-    colors = ['blue', 'green', 'red', 'orange']
-
-    # 绘制条形图
-    bars = ax.bar(metrics, values, color=colors)
-
-    # 添加数值标签
-    for bar in bars:
-        height = bar.get_height()
-        ax.text(bar.get_x() + bar.get_width() / 2., height + 0.1,
-                f'{height:.2f}', ha='center', va='bottom')
-
-    # 设置标题和标签
-    is_correct = outResults.get('actual_comparison', {}).get('classification_matches_actual', False)
-    classification = outResults.get('classification', 'Unknown')
-    actual_is_lensed = outResults.get('actual_comparison', {}).get('actual_is_lensed', False)
-
-    title = f'Lensed vs Unlensed Model Comparison (Run {best_run_number})\n'
-    title += f'Classification: {classification} '
-    if 'actual_comparison' in outResults:
-        title += f'({"CORRECT" if is_correct else "INCORRECT"} - Actual: {"Lensed" if actual_is_lensed else "Unlensed"})'
-
-    if balanced_pso:
-        title = f'Balanced Dimension PSO: {title}'
-    if use_bayesian:
-        title = f'Bayesian Approach: {title}'
-
-    plt.title(title)
-    plt.ylabel('Value')
-    plt.grid(axis='y', alpha=0.3)
-    plt.legend()
-
-    plt.tight_layout()
-    plt.savefig('model_comparison.png')
-    plt.close()
-
-# 如果有维度探索分析，创建可视化
-if 'best_dimension_analysis' in outResults:
-    dim_analysis = outResults['best_dimension_analysis']
-
-    # 创建维度探索覆盖率图
-    plt.figure(figsize=(12, 6), dpi=200)
-
-    # 准备绘图数据
-    dim_names = ['r', 'm_c', 'tc', 'phi_c', 'A', 'delta_t']
-    coverage_values = []
-    variance_values = []
-    concentration_values = []
-
-    for dim in dim_names:
-        if dim in dim_analysis:
-            coverage_values.append(dim_analysis[dim]['coverage'])
-            variance_values.append(dim_analysis[dim]['variance'])
-            concentration_values.append(dim_analysis[dim]['concentration'])
-
-    # 创建子图
-    plt.bar(dim_names, coverage_values, color='blue', alpha=0.7)
-    plt.axhline(y=dim_analysis['overall']['mean_coverage'], color='red', linestyle='--',
-                label=f'Mean Coverage: {dim_analysis["overall"]["mean_coverage"]:.2f}')
-
-    plt.ylabel('Dimension Coverage')
-    title = 'Dimension Exploration Analysis'
-    if balanced_pso:
-        title = f'Balanced PSO: {title}'
-    if use_bayesian:
-        title = f'Bayesian: {title}'
-    plt.title(title)
-    plt.ylim(0, 1.1)
-    plt.legend()
-    plt.grid(axis='y', alpha=0.3)
-    plt.savefig('dimension_coverage.png')
-    plt.close()
-
-    # 创建直方图分布可视化
-    fig, axs = plt.subplots(3, 2, figsize=(15, 12), dpi=200)
-
-    for i, dim in enumerate(dim_names):
-        if dim in dim_analysis:
-            row, col = i // 2, i % 2
-
-            # 获取该维度的直方图数据
-            hist_data = dim_analysis[dim]['histogram']
-
-            # 创建直方图
-            axs[row, col].bar(range(10), hist_data, width=0.8)
-            axs[row, col].set_xlabel(f'Range ({dim})')
-            axs[row, col].set_ylabel('Particle Count')
-            axs[row, col].set_title(f'Dimension {dim} Exploration (Coverage: {dim_analysis[dim]["coverage"]:.2f})')
-            axs[row, col].grid(True, alpha=0.3)
-
-    plt.tight_layout()
-    title = 'Dimension Histograms'
-    if balanced_pso:
-        title = f'Balanced PSO: {title}'
-    if use_bayesian:
-        title = f'Bayesian: {title}'
-    plt.suptitle(title, y=1.02)
-    plt.savefig('dimension_histograms.png')
-    plt.close()
 
 # 初始化存储所有结果的列表
 all_results = []
@@ -809,21 +589,8 @@ columns = [
     'bayesian_used'
 ]
 
-# # 添加平衡维度PSO列
-# if balanced_pso:
-#     columns.extend(['balanced_pso', 'mean_dimension_coverage', 'dimension_coverage_imbalance'])
-#
-# # 如果有与实际参数的比较，添加额外的列
-# if 'actual_comparison' in outResults:
-#     extra_columns = [
-#         'classification_correct', 'actual_is_lensed',
-#         'parameter_r_error', 'parameter_m_c_error', 'parameter_tc_error',
-#         'parameter_A_error', 'parameter_delta_t_error'
-#     ]
-#     columns.extend(extra_columns)
-
 # 使用pandas保存为CSV以获得更好的格式
-df = pd.DataFrame(all_results, columns=columns)
+df = pd.DataFrame(all_results)
 csv_filename = 'pso_results.csv'
 df.to_csv(csv_filename, index=False)
 
