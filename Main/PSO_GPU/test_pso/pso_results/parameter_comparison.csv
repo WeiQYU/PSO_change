@@ -1,0 +1,7 @@
+Parameter,Actual Value,Estimated Value,Relative Error (%),Method
+Chirp Mass (M⊙),30.09,30.100633662817163,0.0353395241514233,Balanced Dimension Bayesian PSO
+Merger Time (s),7.5,7.4999938148869285,8.246817428651336e-05,Balanced Dimension Bayesian PSO
+Source Distance (Mpc),3100.0,45.939577593904744,98.5180781421321,Balanced Dimension Bayesian PSO
+Flux Ratio (A),0.3333,0.28260839066907584,15.20900369964721,Balanced Dimension Bayesian PSO
+Time Delay (s),0.9854,0.8240919480011707,16.369804343295044,Balanced Dimension Bayesian PSO
+Phase (rad/2π),0.25,0.12434020964941268,12.565979035058733,Balanced Dimension Bayesian PSO

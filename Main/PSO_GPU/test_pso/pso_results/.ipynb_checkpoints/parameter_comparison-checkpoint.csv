@@ -1,0 +1,7 @@
+Parameter,Actual Value,Estimated Value,Relative Error (%),Method
+Chirp Mass (M⊙),30.09,40.991893503980414,36.23095215679765,Random Embedding PSO (Low: 6D → High: 20D)
+Merger Time (s),7.5,5.011466348606536,33.18044868524618,Random Embedding PSO (Low: 6D → High: 20D)
+Source Distance (Mpc),3100.0,16.06138318884516,99.48189086487596,Random Embedding PSO (Low: 6D → High: 20D)
+Flux Ratio (A),0.3333,0.3645737817535504,9.383072833348452,Random Embedding PSO (Low: 6D → High: 20D)
+Time Delay (s),0.9854,0.9152985288274649,7.114011687896811,Random Embedding PSO (Low: 6D → High: 20D)
+Phase (rad/2π),0.25,0.0,25.0,Random Embedding PSO (Low: 6D → High: 20D)
