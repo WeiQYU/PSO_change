@@ -236,8 +236,8 @@ def pycbc_calculate_match(signal1, signal2, fs, psd):
 def two_step_matching(params, dataY, psdHigh, sampFreq, actual_params=None):
     """
     Enhanced two-step matching process to classify gravitational wave signals
-    based on the value of A. A < 1 indicates lensed signal, A >= 1 indicates
-    unlensed signal.
+    based on the value of A. A < 0.01 indicates unlensed signal, A >= 0.01 indicates
+    lensed signal.
 
     Parameters:
     -----------
@@ -348,15 +348,15 @@ def two_step_matching(params, dataY, psdHigh, sampFreq, actual_params=None):
     result['model_comparison'] = model_comparison
 
     # Classification based solely on the value of A
-    # A < 1 indicates lensed signal, A >= 1 indicates unlensed signal
-    if A < 1:
-        result['is_lensed'] = True
-        result['message'] = f"This is a lens signal (A = {A:.6f} < 1)"
-        result['classification'] = "lens_signal"
-    else:
+    # A < 0.01 indicates unlensed signal, A >= 0.01 indicates lensed signal
+    if A < 0.01:
         result['is_lensed'] = False
-        result['message'] = f"This is an unlensed signal (A = {A:.6f} >= 1)"
+        result['message'] = f"This is an unlensed signal (A = {A:.6f} < 0.01)"
         result['classification'] = "signal"
+    else:
+        result['is_lensed'] = True
+        result['message'] = f"This is a lens signal (A = {A:.6f} >= 0.01)"
+        result['classification'] = "lens_signal"
 
     # Compare with actual parameters if provided (for evaluation only)
     if actual_params is not None:
@@ -376,13 +376,13 @@ def two_step_matching(params, dataY, psdHigh, sampFreq, actual_params=None):
                                abs(phi_c - actual_params.get('phase', 0) * 2 * cp.pi - 2 * cp.pi)) / (2 * cp.pi),
             'A_error': (A - actual_params.get('flux_ratio', 0)) / actual_params.get('flux_ratio', 1),
             'delta_t_error': (delta_t - actual_params.get('time_delay', 0)) / actual_params.get('time_delay', 1),
-            'classification_correct': (result['is_lensed'] == (actual_params.get('flux_ratio', 0) < 1))
+            'classification_correct': (result['is_lensed'] == (actual_params.get('flux_ratio', 0) >= 0.01))
         }
         result['parameter_errors'] = param_errors
 
         # Create detailed actual value comparison
         actual_comparison = {
-            'actual_is_lensed': actual_params.get('flux_ratio', 0) < 1,
+            'actual_is_lensed': actual_params.get('flux_ratio', 0) >= 0.01,
             'estimated_is_lensed': result['is_lensed'],
             'classification_matches_actual': param_errors['classification_correct'],
             'parameters': {
@@ -399,8 +399,8 @@ def two_step_matching(params, dataY, psdHigh, sampFreq, actual_params=None):
         result['actual_comparison'] = actual_comparison
 
         # Enhance message with actual comparison
-        if result['is_lensed'] != (actual_params.get('flux_ratio', 0) < 1):
-            actual_type = "lensed" if actual_params.get('flux_ratio', 0) < 1 else "unlensed"
+        if result['is_lensed'] != (actual_params.get('flux_ratio', 0) >= 0.01):
+            actual_type = "unlensed" if actual_params.get('flux_ratio', 0) < 0.01 else "lensed"
             result['message'] += f" - MISCLASSIFIED (actual signal is {actual_type})"
         else:
             result['message'] += f" - CORRECT CLASSIFICATION"
@@ -830,7 +830,7 @@ def crcbqcpsopsd(inParams, psoParams, nRuns, use_two_step=True, actual_params=No
             # Use original method to generate signal
             print('未使用两步匹配过程')
             # IMPORTANT: Use lensing flag based on A value
-            is_lensed = A < 1
+            is_lensed = A >= 0.01
             use_lensing = is_lensed
 
             estSig = crcbgenqcsig(inParams['dataX'], r, m_c, tc, phi_c, A, delta_t, use_lensing=use_lensing)
@@ -841,10 +841,10 @@ def crcbqcpsopsd(inParams, psoParams, nRuns, use_two_step=True, actual_params=No
 
             # Generate classification message
             if is_lensed:
-                lensing_message = f"This is a lens signal (A = {A:.6f} < 1)"
+                lensing_message = f"This is a lens signal (A = {A:.6f} >= 0.01)"
                 classification = "lens_signal"
             else:
-                lensing_message = f"This is an unlensed signal (A = {A:.6f} >= 1)"
+                lensing_message = f"This is an unlensed signal (A = {A:.6f} < 0.01)"
                 classification = "signal"
 
             model_comparison = {}
@@ -1586,9 +1586,9 @@ def ssrqc(x, params):
         Negative matched filtering result
     """
     # IMPORTANT: Determine lensing usage based on A parameter value
-    # If A < 1, the signal should be lensed; if A >= 1, the signal should be unlensed
+    # If A < 0.01, the signal should be unlensed; if A >= 0.01, the signal should be lensed
     A = x[4]  # The A parameter
-    use_lensing = A < 1
+    use_lensing = A >= 0.01
 
     # Generate signal based on the A parameter value
     qc = crcbgenqcsig(params['dataX'], x[0], x[1], x[2], x[3], x[4], x[5], use_lensing=use_lensing)
@@ -1624,9 +1624,9 @@ def bayesian_ssrqc(x, params):
         Negative log posterior (likelihood * prior)
     """
     # IMPORTANT: Determine lensing usage based on A parameter value
-    # If A < 1, the signal should be lensed; if A >= 1, the signal should be unlensed
+    # If A < 0.01, the signal should be unlensed; if A >= 0.01, the signal should be lensed
     A = x[4]  # The A parameter
-    use_lensing = A < 1
+    use_lensing = A >= 0.01
 
     # Generate signal based on whether to use lensing or not
     qc = crcbgenqcsig(params['dataX'], x[0], x[1], x[2], x[3], x[4], x[5], use_lensing=use_lensing)

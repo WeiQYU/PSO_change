@@ -27,8 +27,8 @@ nSamples = dataY.size
 Fs = float(analysisData['samples'][0][0])
 
 #                r    mc   tc   phi    A      Δtd
-rmin = cp.array([-2, 0, 1, 0, 0, 0])
-rmax = cp.array([4, 2, 8.0, np.pi, 1.0, 4.0])  # Changed A upper limit to 2.0
+rmin = cp.array([-2, 0, 0.1, 0, 0, 0.1])  # Changed A lower limit to 0
+rmax = cp.array([4, 2, 8.0, np.pi, 1.0, 4.0])  # Changed A upper limit to 1.0
 
 # Time domain settings
 dt = 1 / Fs  # sampling rate Hz
