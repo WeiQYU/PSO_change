@@ -1,0 +1,6 @@
+Metric,PSO,Bilby MCMC
+Execution Time (s),10922.92,7392.00
+Speed Improvement,5.41x faster,baseline
+SNR,24.99,24.39
+Correlation,0.8642,0.8265
+Mismatch,1.7454e-01,1.2488e-01
