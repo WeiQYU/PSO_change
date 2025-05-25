@@ -4,7 +4,14 @@ import matplotlib.pyplot as plt
 import numpy as np
 import scipy.constants as const
 import pandas as pd
+import os
 from PSO_main_demo import *
+
+# Create results directory
+results_dir = 'PSO_results_lens'
+if not os.path.exists(results_dir):
+    os.makedirs(results_dir)
+    print(f"Created directory: {results_dir}")
 
 # Constants
 G = const.G  # Gravitational constant, m^3 kg^-1 s^-2
@@ -56,8 +63,8 @@ nRuns = 8
 
 # PSO配置参数
 pso_config = {
-    'popsize': 1000,  # 增加粒子数量以确保搜索空间的覆盖
-    'maxSteps': 2800,  # 迭代次数
+    'popsize': 100,  # 增加粒子数量以确保搜索空间的覆盖
+    'maxSteps': 3000,  # 迭代次数
     'c1': 2.0,  # 个体学习因子
     'c2': 2.0,  # 社会学习因子
     'w_start': 0.9,  # 初始惯性权重
@@ -92,7 +99,7 @@ print(f"Merger Time: {actual_params['merger_time']:.4f} s")
 print(f"Source Distance: {actual_params['source_distance']:.1f} Mpc")
 print(f"Flux Ratio (A): {actual_params['flux_ratio']:.4f}")
 print(f"Time Delay (delta_t): {actual_params['time_delay']:.4f} s")
-print(f"Phase: {actual_params['phase']:.4f} (fraction of 2π)")
+print(f"Phase: {actual_params['phase']:.4f} ")
 
 # 运行PSO优化，启用两步匹配过程
 # 传入actual_params仅用于评估，不用于构建先验
@@ -114,7 +121,7 @@ title = 'PSO Fitness History'
 plt.title(title)
 plt.legend()
 plt.grid(True)
-plt.savefig('pso_convergence_plot.png')
+plt.savefig(os.path.join(results_dir, 'pso_convergence_plot.png'))
 plt.close()
 
 # 可视化不同运行的参数收敛情况
@@ -159,8 +166,8 @@ for i, (param, values) in enumerate(zip(param_names, param_values)):
         axs[row, col].axhline(y=actual_params['merger_time'], color='green', linestyle='--', alpha=0.7,
                               label=f'Actual: {actual_params["merger_time"]:.2f} s')
     elif param == 'phi_c' and 'phase' in actual_params:
-        axs[row, col].axhline(y=actual_params['phase'] * np.pi, color='green', linestyle='--', alpha=0.7,
-                              label=f'Actual: {actual_params["phase"] * np.pi:.2f} rad')
+        axs[row, col].axhline(y=actual_params['phase'] /np.pi, color='green', linestyle='--', alpha=0.7,
+                              label=f'Actual: {actual_params["phase"] /np.pi:.2f} ')
     elif param == 'A' and 'flux_ratio' in actual_params:
         axs[row, col].axhline(y=actual_params['flux_ratio'], color='green', linestyle='--', alpha=0.7,
                               label=f'Actual: {actual_params["flux_ratio"]:.4f}')
@@ -172,7 +179,7 @@ for i, (param, values) in enumerate(zip(param_names, param_values)):
 
 plt.tight_layout()
 plt.suptitle('Parameter Convergence', y=1.02)
-plt.savefig('parameter_convergence.png')
+plt.savefig(os.path.join(results_dir, 'parameter_convergence.png'))
 plt.close()
 
 # 在一个图上显示所有运行的信号
@@ -233,7 +240,7 @@ plt.ylabel('Strain')
 plt.legend(loc='upper right')
 
 # 保存图表
-plt.savefig('all_pso_runs_comparison.png')
+plt.savefig(os.path.join(results_dir, 'all_pso_runs_comparison.png'))
 plt.close()
 
 # 处理最佳运行结果进行可视化
@@ -339,10 +346,10 @@ axs[1].grid(False)
 
 # 调整子图间距
 plt.tight_layout()
-plt.savefig('detailed_signal_comparison_with_ratio.png', bbox_inches='tight')
+plt.savefig(os.path.join(results_dir, 'detailed_signal_comparison_with_ratio.png'), bbox_inches='tight')
 plt.close()
 
-print(f"详细比较图已保存为：detailed_signal_comparison_with_ratio.png")
+print(f"详细比较图已保存为：{os.path.join(results_dir, 'detailed_signal_comparison_with_ratio.png')}")
 
 # 初始化存储所有结果的列表
 all_results = []
@@ -481,7 +488,7 @@ columns = [
 
 # 使用pandas保存为CSV以获得更好的格式
 df = pd.DataFrame(all_results)
-csv_filename = 'pso_results.csv'
+csv_filename = os.path.join(results_dir, 'pso_results.csv')
 df.to_csv(csv_filename, index=False)
 
 
@@ -501,8 +508,8 @@ def get_estimated_value(param_name):
     elif param_name == 'phi_c':
         value = outResults['phi_c']
         if isinstance(value, cp.ndarray):
-            return float(value.get()) / (2 * np.pi)
-        return float(value) / (2 * np.pi)
+            return float(value.get()) / np.pi
+        return float(value) / np.pi
     else:
         value = outResults[param_name]
         if isinstance(value, cp.ndarray):
@@ -541,8 +548,9 @@ comparison_df = pd.DataFrame({
 })
 
 # 保存参数比较表
-comparison_df.to_csv('parameter_comparison.csv', index=False)
+comparison_df.to_csv(os.path.join(results_dir, 'parameter_comparison.csv'), index=False)
 
 print(f"\n本次标准PSO飞行结束")
-print(f"飞行结果报告已保存在：{csv_filename}和parameter_comparison.csv")
-print(f"详细比较图已保存在：detailed_signal_comparison_with_ratio.png")
+print(f"飞行结果报告已保存在：{csv_filename}和{os.path.join(results_dir, 'parameter_comparison.csv')}")
+print(f"所有结果文件已保存到目录：{results_dir}")
+print(f"详细比较图已保存在：{os.path.join(results_dir, 'detailed_signal_comparison_with_ratio.png')}")

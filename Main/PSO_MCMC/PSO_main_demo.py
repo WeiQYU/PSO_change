@@ -267,10 +267,10 @@ def two_step_matching(params, dataY, psdHigh, sampFreq, actual_params=None):
     result = {
         'unlensed_signal': None,
         'unlensed_snr': None,
-        'unlensed_mismatch': None,
+        'unlensed_match': None,
         'lensed_signal': None,
         'lensed_snr': None,
-        'lensed_mismatch': None,
+        'lensed_match': None,
         'is_lensed': False,
         'message': "",
         'classification': "noise",  # Default classification
@@ -287,7 +287,7 @@ def two_step_matching(params, dataY, psdHigh, sampFreq, actual_params=None):
     estAmp = innerprodpsd(dataY_only_signal, unlensed_signal, sampFreq, psdHigh)
     unlensed_signal = estAmp * unlensed_signal
 
-    # Calculate SNR and mismatch for unlensed model
+    # Calculate SNR and match for unlensed model
     unlensed_snr = calculate_matched_filter_snr(unlensed_signal, dataY_only_signal, psdHigh, sampFreq)
     print(f'unlensed_snr: {unlensed_snr}')
 
@@ -306,10 +306,10 @@ def two_step_matching(params, dataY, psdHigh, sampFreq, actual_params=None):
         return result
     print("不是噪声")
 
-    # Calculate mismatch using pycbc.filter.match
-    unlensed_mismatch = 1 - pycbc_calculate_match(unlensed_signal, dataY_only_signal, sampFreq, psdHigh)
-    result['unlensed_mismatch'] = unlensed_mismatch
-    print(f"Unlensed mismatch: {unlensed_mismatch}")
+    # Calculate match using pycbc.filter.match
+    unlensed_match = pycbc_calculate_match(unlensed_signal, dataY_only_signal, sampFreq, psdHigh)
+    result['unlensed_match'] = unlensed_match
+    print(f"Unlensed match: {unlensed_match}")
 
     # Generate lensed signal for comparison
     lensed_signal = crcbgenqcsig(dataX, r, m_c, tc, phi_c, A, delta_t, use_lensing=True)
@@ -319,26 +319,26 @@ def two_step_matching(params, dataY, psdHigh, sampFreq, actual_params=None):
     estAmp = innerprodpsd(dataY_only_signal, lensed_signal, sampFreq, psdHigh)
     lensed_signal = estAmp * lensed_signal
 
-    # Calculate SNR and mismatch for lensed model
+    # Calculate SNR and match for lensed model
     lensed_snr = calculate_matched_filter_snr(lensed_signal, dataY_only_signal, psdHigh, sampFreq)
     print(f'lensed_snr: {lensed_snr}')
 
-    lensed_mismatch = 1 - pycbc_calculate_match(lensed_signal, dataY_only_signal, sampFreq, psdHigh)
-    print(f"Lensed mismatch: {lensed_mismatch}")
+    lensed_match = pycbc_calculate_match(lensed_signal, dataY_only_signal, sampFreq, psdHigh)
+    print(f"Lensed match: {lensed_match}")
 
     # Update result with lensed signal info
     result.update({
         'lensed_signal': lensed_signal,
         'lensed_snr': lensed_snr,
-        'lensed_mismatch': lensed_mismatch
+        'lensed_match': lensed_match
     })
 
     # Model comparison metrics
     model_comparison = {
         'snr_difference': lensed_snr - unlensed_snr,
-        'mismatch_difference': unlensed_mismatch - lensed_mismatch,
+        'match_difference': lensed_match - unlensed_match,  # Changed from mismatch difference
         'snr_ratio': lensed_snr / unlensed_snr if unlensed_snr > 0 else float('inf'),
-        'mismatch_ratio': unlensed_mismatch / lensed_mismatch if lensed_mismatch > 0 else float('inf')
+        'match_ratio': lensed_match / unlensed_match if unlensed_match > 0 else float('inf')
     }
     result['model_comparison'] = model_comparison
 
@@ -731,7 +731,7 @@ def crcbpso(fitfuncHandle, nDim, **kwargs):
         'totalFuncEvals': 0,
         'bestLocation': cp.zeros((1, nDim)),
         'bestFitness': cp.inf,
-        'fitnessHistory': []  # Record fitness history
+        'fitnessHistory': []  # Record fitness history for plotting
     }
 
     # Standard initialization strategy
