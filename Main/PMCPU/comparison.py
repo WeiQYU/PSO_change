@@ -1,4 +1,3 @@
-import cupy as cp
 import numpy as np
 import scipy.io as scio
 import matplotlib.pyplot as plt
@@ -11,7 +10,7 @@ import os
 import warnings
 
 # Import the PSO implementation
-from PSO_main_demo import (
+from PSO import (
     crcbqcpsopsd, crcbgenqcsig, normsig4psd, innerprodpsd,
     calculate_matched_filter_snr, pycbc_calculate_match
 )
@@ -33,7 +32,7 @@ M_sun = 1.989e30  # Solar mass, kg
 pc = 3.086e16  # Parsec to meters
 
 # Create results directory
-results_dir = "GPU_results"
+results_dir = "cpu_results_fixed"
 os.makedirs(results_dir, exist_ok=True)
 
 
@@ -47,19 +46,19 @@ def load_data():
 
     print("Data loaded successfully")
 
-    # Convert data to CuPy arrays for PSO
-    dataY = cp.asarray(analysisData['data'][0])
-    training_noise = cp.asarray(TrainingData['noise'][0])
+    # Convert data to NumPy arrays for CPU processing
+    dataY = np.asarray(analysisData['data'][0])
+    training_noise = np.asarray(TrainingData['noise'][0])
     dataY_only_signal = dataY - training_noise  # Extract signal part (for comparison)
 
     # Get basic parameters
     nSamples = dataY.size
     Fs = float(analysisData['samples'][0][0])
     dt = 1 / Fs
-    t = cp.arange(0, 8, dt)
+    t = np.arange(0, 8, dt)
 
     # Calculate PSD
-    psdHigh = cp.asarray(TrainingData['psd'][0])
+    psdHigh = np.asarray(TrainingData['psd'][0])
 
     return {
         't': t,
@@ -77,8 +76,8 @@ def setup_parameters(data):
 
     # Define parameter ranges (min/max)
     param_ranges = {
-        'rmin': cp.array([-2, 0, 0.1, 0, 0, 0.1]),  # r, mc, tc, phi, A, delta_t
-        'rmax': cp.array([4, 2, 8.0, np.pi, 1.0, 4.0])
+        'rmin': np.array([-2, 0, 0.1, 0, 0, 0.1]),  # r, mc, tc, phi, A, delta_t
+        'rmax': np.array([4, 2, 8.0, np.pi, 1.0, 4.0])
     }
 
     # Define actual parameters for validation (for synthetic data)
@@ -102,10 +101,10 @@ def setup_parameters(data):
         'rmax': param_ranges['rmax']
     }
 
-    # Set up PSO configuration with increased particle count and iterations
+    # Set up PSO configuration
     pso_config = {
-        'popsize': 50,  # Increased from 10 to 100
-        'maxSteps': 2000,  # Increased from 30 to 3000
+        'popsize': 80,  # 80 particles
+        'maxSteps': 2000,  # 2000 iterations
         'c1': 2.0,  # Individual learning factor
         'c2': 2.0,  # Social learning factor
         'w_start': 0.9,  # Initial inertia weight
@@ -118,9 +117,8 @@ def setup_parameters(data):
     return param_ranges, pso_params, pso_config, actual_params
 
 
-# Define Bilby likelihood for gravitational wave analysis
 class GWLikelihood(Likelihood):
-    """Gravitational wave likelihood for Bilby"""
+    """Fixed gravitational wave likelihood function for Bilby"""
 
     def __init__(self, data_dict):
         """Initialize the likelihood with data"""
@@ -129,16 +127,25 @@ class GWLikelihood(Likelihood):
             'phi_c': None, 'A': None, 'delta_t': None
         })
         self.data_dict = data_dict
-        self.dataX_np = cp.asnumpy(data_dict['dataX']) if isinstance(data_dict['dataX'], cp.ndarray) else data_dict[
-            'dataX']
-        self.dataY_only_signal_np = cp.asnumpy(data_dict['dataY_only_signal']) if isinstance(
-            data_dict['dataY_only_signal'], cp.ndarray) else data_dict['dataY_only_signal']
-        self.psd_np = cp.asnumpy(data_dict['psdHigh']) if isinstance(data_dict['psdHigh'], cp.ndarray) else data_dict[
-            'psdHigh']
+        
+        # Ensure data conversion to NumPy arrays
+        self.dataX_np = np.asarray(data_dict['dataX']) if not isinstance(data_dict['dataX'], np.ndarray) else data_dict['dataX']
+        self.dataY_only_signal_np = np.asarray(data_dict['dataY_only_signal']) if not isinstance(
+            data_dict['dataY_only_signal'], np.ndarray) else data_dict['dataY_only_signal']
+        self.psd_np = np.asarray(data_dict['psdHigh']) if not isinstance(data_dict['psdHigh'], np.ndarray) else data_dict['psdHigh']
+        
+        # Add debug counter
+        self.debug_count = 0
+        print(f"GWLikelihood initialized with:")
+        print(f"  Data shape: {self.dataY_only_signal_np.shape}")
+        print(f"  PSD shape: {self.psd_np.shape}")
+        print(f"  Sampling frequency: {self.data_dict['sampFreq']}")
 
     def log_likelihood(self):
-        """Log-likelihood function for Bilby"""
+        """Fixed log-likelihood function based on reference code approach"""
         try:
+            self.debug_count += 1
+            
             # Get parameters
             params = np.array([
                 self.parameters['r'],
@@ -149,6 +156,10 @@ class GWLikelihood(Likelihood):
                 self.parameters['delta_t']
             ])
 
+            # Check if parameters are in [0,1] range
+            if not np.all((params >= 0) & (params <= 1)):
+                return -np.inf
+
             # Map from [0,1] to original parameter range
             unscaled_params = np.zeros(6)
             for i in range(6):
@@ -157,94 +168,126 @@ class GWLikelihood(Likelihood):
 
             r, m_c, tc, phi_c, A, delta_t = unscaled_params
 
-            # Determine if we should use lensing based on A parameter
+            # Add parameter reasonableness checks
+            if r < -2 or r > 4:  # log10(distance)
+                return -np.inf
+            if m_c < 0 or m_c > 2:  # log10(chirp_mass)
+                return -np.inf
+            if tc < 0.1 or tc > 8.0:  # merger time
+                return -np.inf
+
+            # Determine lensing usage based on A parameter - consistent with PSO
             use_lensing = A >= 0.01
 
-            # Generate the signal
+            # Generate signal - using same method as PSO
             signal = crcbgenqcsig(
-                cp.asarray(self.dataX_np), r, m_c, tc, phi_c, A, delta_t,
+                self.dataX_np, r, m_c, tc, phi_c, A, delta_t,
                 use_lensing=use_lensing
             )
 
             # Check if signal generation was successful
-            if signal is None or cp.isnan(signal).any():
+            if signal is None or np.isnan(signal).any() or np.all(signal == 0):
+                if self.debug_count <= 5:  # Only output debug info for first few calls
+                    print(f"Debug {self.debug_count}: Signal generation failed")
                 return -np.inf
 
-            signal, _ = normsig4psd(signal, self.data_dict['sampFreq'], cp.asarray(self.psd_np), 1)
-
-            # Optimize amplitude
-            estAmp = innerprodpsd(
-                cp.asarray(self.dataY_only_signal_np), signal,
-                self.data_dict['sampFreq'], cp.asarray(self.psd_np)
-            )
-
-            # Check for valid amplitude
-            if estAmp is None or cp.isnan(estAmp):
+            # Normalize signal - using same method as PSO
+            try:
+                signal_normalized, normFac = normsig4psd(signal, self.data_dict['sampFreq'], self.psd_np, 1)
+                
+                if normFac == 0 or np.isnan(normFac) or np.all(signal_normalized == 0):
+                    if self.debug_count <= 5:
+                        print(f"Debug {self.debug_count}: Normalization failed, normFac={normFac}")
+                    return -np.inf
+                    
+            except Exception as e:
+                if self.debug_count <= 5:
+                    print(f"Debug {self.debug_count}: Normalization exception: {e}")
                 return -np.inf
 
-            signal = estAmp * signal
+            # Optimize amplitude - using same method as PSO
+            try:
+                estAmp = innerprodpsd(
+                    self.dataY_only_signal_np, signal_normalized,
+                    self.data_dict['sampFreq'], self.psd_np
+                )
 
-            # Calculate log-likelihood using matched filter SNR
-            signal_np = cp.asnumpy(signal)
+                # Check for valid amplitude
+                if estAmp is None or np.isnan(estAmp) or abs(estAmp) < 1e-15:
+                    if self.debug_count <= 5:
+                        print(f"Debug {self.debug_count}: Amplitude estimation failed, estAmp={estAmp}")
+                    return -np.inf
 
-            # Using PyCBC's match function
-            delta_t = 1.0 / self.data_dict['sampFreq']
-            ts_signal = TimeSeries(signal_np, delta_t=delta_t)
-            ts_data = TimeSeries(self.dataY_only_signal_np, delta_t=delta_t)
+                signal_final = estAmp * signal_normalized
+                
+            except Exception as e:
+                if self.debug_count <= 5:
+                    print(f"Debug {self.debug_count}: Amplitude optimization exception: {e}")
+                return -np.inf
 
-            delta_f = 1.0 / (len(signal_np) * delta_t)
-            psd_series = FrequencySeries(self.psd_np, delta_f=delta_f)
+            # Calculate log-likelihood using reference code method - using PyCBC match function
+            try:
+                # Using PyCBC's match function - reference code approach
+                delta_t = 1.0 / self.data_dict['sampFreq']
+                ts_signal = TimeSeries(signal_final, delta_t=delta_t)
+                ts_data = TimeSeries(self.dataY_only_signal_np, delta_t=delta_t)
 
-            # Catch potential numerical issues
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore")
-                try:
+                delta_f = 1.0 / (len(signal_final) * delta_t)
+                psd_series = FrequencySeries(self.psd_np, delta_f=delta_f)
+
+                # Catch potential numerical issues
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")
+                    
                     match_value, _ = match(ts_signal, ts_data, psd=psd_series, low_frequency_cutoff=10.0)
 
                     # Ensure match_value is valid and in range [0,1]
                     if match_value is None or np.isnan(match_value) or match_value <= 0 or match_value > 1:
+                        if self.debug_count <= 5:
+                            print(f"Debug {self.debug_count}: Invalid match value: {match_value}")
                         return -np.inf
 
                     # Convert match to log-likelihood (avoiding numerical issues)
-                    log_likelihood = 0.5 * len(self.dataY_only_signal_np) * np.log(match_value)
+                    # Using more robust log-likelihood calculation
+                    log_likelihood_value = 0.5 * len(self.dataY_only_signal_np) * np.log(max(match_value, 1e-10))
 
                     # Catch extreme values
-                    if np.isnan(log_likelihood) or np.isinf(log_likelihood):
+                    if np.isnan(log_likelihood_value) or np.isinf(log_likelihood_value):
+                        if self.debug_count <= 5:
+                            print(f"Debug {self.debug_count}: Invalid log_likelihood: {log_likelihood_value}")
                         return -np.inf
 
-                    return log_likelihood
-                except Exception as e:
-                    # Handle any exceptions during matching
-                    print(f"Warning: Match calculation error - {str(e)}")
-                    return -np.inf
+                    # Output progress info every 1000 calls
+                    if self.debug_count % 1000 == 0:
+                        print(f"MCMC Progress: {self.debug_count} calls, match={match_value:.6f}, log_L={log_likelihood_value:.2f}")
+
+                    return log_likelihood_value
+                    
+            except Exception as e:
+                if self.debug_count <= 5:
+                    print(f"Debug {self.debug_count}: Match calculation error: {str(e)}")
+                return -np.inf
+                
         except Exception as e:
-            # Catch all other exceptions
-            print(f"Warning: Likelihood calculation error - {str(e)}")
+            if self.debug_count <= 5:
+                print(f"Debug {self.debug_count}: General likelihood error: {str(e)}")
             return -np.inf
 
 
-def run_bilby_mcmc(data_dict, param_ranges, n_live_points=50, n_iter=2000):
-    """Run MCMC analysis using Bilby and return results
+def run_bilby_mcmc(data_dict, param_ranges, n_live_points=400, n_iter=2000):
+    """Fixed Bilby MCMC execution function"""
+    print("Starting Fixed Bilby MCMC analysis...")
 
-    Parameters adjusted to match computational effort of PSO (100 particles, 3000 iterations)
-    with n_live_points=500 and n_iter=600 (approximately 300,000 function evaluations).
-    """
-    print("Starting Bilby MCMC analysis...")
-
-    # Create dictionary for MCMC with numpy arrays
+    # Create dictionary for MCMC with numpy arrays - ensure correct data types
     mcmc_data = {
-        'dataX': cp.asnumpy(data_dict['t']) if isinstance(data_dict['t'], cp.ndarray) else data_dict['t'],
-        'dataY': cp.asnumpy(data_dict['dataY']) if isinstance(data_dict['dataY'], cp.ndarray) else data_dict['dataY'],
-        'dataY_only_signal': cp.asnumpy(data_dict['dataY_only_signal']) if isinstance(data_dict['dataY_only_signal'],
-                                                                                      cp.ndarray) else data_dict[
-            'dataY_only_signal'],
+        'dataX': np.asarray(data_dict['t']) if not isinstance(data_dict['t'], np.ndarray) else data_dict['t'],
+        'dataY': np.asarray(data_dict['dataY']) if not isinstance(data_dict['dataY'], np.ndarray) else data_dict['dataY'],
+        'dataY_only_signal': np.asarray(data_dict['dataY_only_signal']) if not isinstance(data_dict['dataY_only_signal'],
+                                                                                      np.ndarray) else data_dict['dataY_only_signal'],
         'sampFreq': data_dict['sampFreq'],
-        'psdHigh': cp.asnumpy(data_dict['psdHigh']) if isinstance(data_dict['psdHigh'], cp.ndarray) else data_dict[
-            'psdHigh'],
-        'rmin': cp.asnumpy(param_ranges['rmin']) if isinstance(param_ranges['rmin'], cp.ndarray) else param_ranges[
-            'rmin'],
-        'rmax': cp.asnumpy(param_ranges['rmax']) if isinstance(param_ranges['rmax'], cp.ndarray) else param_ranges[
-            'rmax']
+        'psdHigh': np.asarray(data_dict['psdHigh']) if not isinstance(data_dict['psdHigh'], np.ndarray) else data_dict['psdHigh'],
+        'rmin': np.asarray(param_ranges['rmin']) if not isinstance(param_ranges['rmin'], np.ndarray) else param_ranges['rmin'],
+        'rmax': np.asarray(param_ranges['rmax']) if not isinstance(param_ranges['rmax'], np.ndarray) else param_ranges['rmax']
     }
 
     # Start timing
@@ -266,7 +309,7 @@ def run_bilby_mcmc(data_dict, param_ranges, n_live_points=50, n_iter=2000):
     mcmc_iteration_history = []
 
     try:
-        # Run the bilby sampler with improved settings and matching computational effort
+        # Run sampler using reference code settings
         result = bilby.run_sampler(
             likelihood=likelihood,
             priors=priors,
@@ -276,7 +319,7 @@ def run_bilby_mcmc(data_dict, param_ranges, n_live_points=50, n_iter=2000):
             verbose=True,
             maxiter=n_iter,  # Maximum iterations
             outdir=results_dir,
-            label='gw_analysis',
+            label='gw_analysis_fixed',
             resume=False,
             check_point_plot=False,
             bound='multi',  # More robust boundary scheme
@@ -298,14 +341,16 @@ def run_bilby_mcmc(data_dict, param_ranges, n_live_points=50, n_iter=2000):
         
     except Exception as e:
         print(f"Error in Bilby MCMC: {str(e)}")
-        # Return a minimal result structure to prevent further errors
+        import traceback
+        traceback.print_exc()
+        # Return minimal result structure to prevent further errors
         end_time = time.time()
         return {
             'duration': end_time - start_time,
             'best_params': {
                 'r': 0, 'm_c': 0, 'tc': 0, 'phi_c': 0, 'A': 0, 'delta_t': 0
             },
-            'best_signal': np.zeros_like(cp.asnumpy(data_dict['dataY_only_signal'])),
+            'best_signal': np.zeros_like(data_dict['dataY_only_signal']),
             'snr': 0,
             'is_lensed': False,
             'classification': "error",
@@ -316,7 +361,7 @@ def run_bilby_mcmc(data_dict, param_ranges, n_live_points=50, n_iter=2000):
 
     end_time = time.time()
     mcmc_duration = end_time - start_time
-    print(f"Bilby MCMC completed in {mcmc_duration:.2f} seconds")
+    print(f"Fixed Bilby MCMC completed in {mcmc_duration:.2f} seconds")
 
     try:
         # Get best fit parameters (maximum likelihood sample)
@@ -333,41 +378,66 @@ def run_bilby_mcmc(data_dict, param_ranges, n_live_points=50, n_iter=2000):
 
             r, m_c, tc, phi_c, A, delta_t = best_params
 
-            # Generate best signal
+            print(f"MCMC Best Parameters:")
+            print(f"  r (log10 distance): {r:.4f}")
+            print(f"  m_c (log10 chirp mass): {m_c:.4f}")
+            print(f"  tc (merger time): {tc:.4f}")
+            print(f"  phi_c (phase): {phi_c:.4f}")
+            print(f"  A (flux ratio): {A:.4f}")
+            print(f"  delta_t (time delay): {delta_t:.4f}")
+
+            # Generate best signal using SAME method as PSO
             use_lensing = A >= 0.01
+            print(f"MCMC using lensing: {use_lensing}")
+            
             best_signal = crcbgenqcsig(
-                cp.asarray(mcmc_data['dataX']), r, m_c, tc, phi_c, A, delta_t,
+                mcmc_data['dataX'], r, m_c, tc, phi_c, A, delta_t,
                 use_lensing=use_lensing
             )
-            best_signal, _ = normsig4psd(best_signal, mcmc_data['sampFreq'], cp.asarray(mcmc_data['psdHigh']), 1)
+            
+            # Apply SAME normalization as PSO
+            best_signal, normFac = normsig4psd(best_signal, mcmc_data['sampFreq'], mcmc_data['psdHigh'], 1)
+            print(f"MCMC normalization factor: {normFac}")
 
-            # Optimize amplitude
+            # Apply SAME amplitude optimization as PSO
             estAmp = innerprodpsd(
-                cp.asarray(mcmc_data['dataY_only_signal']), best_signal,
-                mcmc_data['sampFreq'], cp.asarray(mcmc_data['psdHigh'])
-            )
-            best_signal = estAmp * best_signal
-
-            # Calculate SNR
-            snr = calculate_matched_filter_snr(
-                best_signal, cp.asarray(mcmc_data['dataY_only_signal']),
-                cp.asarray(mcmc_data['psdHigh']), mcmc_data['sampFreq']
-            )
-
-            # Determine if signal is lensed
-            is_lensed = A >= 0.01
-            classification = "lens_signal" if is_lensed else "signal"
-
-            # Calculate match (correlation coefficient)
-            match_value = pycbc_calculate_match(
-                cp.asnumpy(best_signal), mcmc_data['dataY_only_signal'],
+                mcmc_data['dataY_only_signal'], best_signal,
                 mcmc_data['sampFreq'], mcmc_data['psdHigh']
             )
+            best_signal = estAmp * best_signal
+            print(f"MCMC estimated amplitude: {estAmp}")
+            print(f"MCMC signal max amplitude: {np.max(np.abs(best_signal))}")
+
+            # Calculate SNR using SAME method as PSO
+            snr = calculate_matched_filter_snr(
+                best_signal, mcmc_data['dataY_only_signal'],
+                mcmc_data['psdHigh'], mcmc_data['sampFreq']
+            )
+
+            # Determine classification using SAME logic as PSO
+            is_lensed = A >= 0.01
+            if snr < 8:
+                classification = "noise"
+            elif is_lensed:
+                classification = "lens_signal"
+            else:
+                classification = "signal"
+
+            # Calculate match
+            match_value = pycbc_calculate_match(
+                best_signal, mcmc_data['dataY_only_signal'],
+                mcmc_data['sampFreq'], mcmc_data['psdHigh']
+            )
+
+            print(f"MCMC Results Summary:")
+            print(f"  SNR: {snr:.2f}")
+            print(f"  Match: {match_value:.4f}")
+            print(f"  Classification: {classification}")
+            print(f"  Is Lensed: {is_lensed}")
 
             # Convert posterior samples to array
             samples = result.posterior[param_names].values
         else:
-            # If no posterior samples, set defaults
             print("Warning: No posterior samples found. Using default values.")
             best_params = np.zeros(6)
             r, m_c, tc, phi_c, A, delta_t = best_params
@@ -389,8 +459,8 @@ def run_bilby_mcmc(data_dict, param_ranges, n_live_points=50, n_iter=2000):
                 'A': A,
                 'delta_t': delta_t
             },
-            'best_signal': cp.asnumpy(best_signal) if isinstance(best_signal, cp.ndarray) else best_signal,
-            'snr': float(snr) if isinstance(snr, (cp.ndarray, np.ndarray)) else snr,
+            'best_signal': best_signal if isinstance(best_signal, np.ndarray) else best_signal,
+            'snr': float(snr) if isinstance(snr, (np.ndarray, float)) else snr,
             'is_lensed': is_lensed,
             'classification': classification,
             'match': match_value,  # Use match instead of mismatch
@@ -409,7 +479,8 @@ def run_bilby_mcmc(data_dict, param_ranges, n_live_points=50, n_iter=2000):
 
     except Exception as e:
         print(f"Error in processing Bilby results: {str(e)}")
-        # Return minimal results
+        import traceback
+        traceback.print_exc()
         return {
             'duration': mcmc_duration,
             'best_params': {
@@ -454,12 +525,12 @@ def run_pso(data_dict, pso_params, pso_config, actual_params, n_runs=1):
         best_signal = outResults['bestSig']
 
         # Calculate match explicitly (instead of mismatch)
-        dataY_only_signal = cp.asarray(data_dict['dataY_only_signal'])
+        dataY_only_signal = np.asarray(data_dict['dataY_only_signal'])
         match_value = pycbc_calculate_match(
-            cp.asnumpy(best_signal),
-            cp.asnumpy(dataY_only_signal),
+            best_signal,
+            dataY_only_signal,
             data_dict['sampFreq'],
-            cp.asnumpy(data_dict['psdHigh'])
+            data_dict['psdHigh']
         )
 
         # Extract iteration history from PSO runs
@@ -481,7 +552,7 @@ def run_pso(data_dict, pso_params, pso_config, actual_params, n_runs=1):
                 'A': outResults['A'],
                 'delta_t': outResults['delta_t']
             },
-            'best_signal': cp.asnumpy(best_signal) if isinstance(best_signal, cp.ndarray) else best_signal,
+            'best_signal': best_signal if isinstance(best_signal, np.ndarray) else best_signal,
             'snr': outResults['allRunsOutput'][best_run_idx]['SNR_pycbc'],
             'is_lensed': outResults['is_lensed'],
             'classification': outResults['classification'],
@@ -501,7 +572,7 @@ def run_pso(data_dict, pso_params, pso_config, actual_params, n_runs=1):
             'best_params': {
                 'r': 0, 'm_c': 0, 'tc': 0, 'phi_c': 0, 'A': 0, 'delta_t': 0
             },
-            'best_signal': np.zeros_like(cp.asnumpy(data_dict['dataY_only_signal'])),
+            'best_signal': np.zeros_like(data_dict['dataY_only_signal']),
             'snr': 0,
             'is_lensed': False,
             'classification': "error",
@@ -554,23 +625,21 @@ def evaluate_results(pso_results, mcmc_results, actual_params, data_dict):
         }
 
         # Calculate match with actual signal (using match instead of correlation)
-        dataY_only_signal_np = cp.asnumpy(data_dict['dataY_only_signal']) if isinstance(data_dict['dataY_only_signal'],
-                                                                                        cp.ndarray) else data_dict[
+        dataY_only_signal_np = np.asarray(data_dict['dataY_only_signal']) if not isinstance(data_dict['dataY_only_signal'],
+                                                                                        np.ndarray) else data_dict[
             'dataY_only_signal']
 
         pso_match = pycbc_calculate_match(pso_results['best_signal'], dataY_only_signal_np, 
-                                         data_dict['sampFreq'], cp.asnumpy(data_dict['psdHigh']))
+                                         data_dict['sampFreq'], data_dict['psdHigh'])
         mcmc_match = pycbc_calculate_match(mcmc_results['best_signal'], dataY_only_signal_np,
-                                          data_dict['sampFreq'], cp.asnumpy(data_dict['psdHigh']))
+                                          data_dict['sampFreq'], data_dict['psdHigh'])
 
-        # Prepare comparison metrics (use adjusted PSO duration)
-        pso_duration_adjusted = pso_results['duration']   
-
+        # Prepare comparison metrics
         comparison = {
             'execution_time': {
-                'PSO': pso_duration_adjusted,  # Use adjusted time
+                'PSO': pso_results['duration'],
                 'MCMC': mcmc_results['duration'],
-                'ratio': mcmc_results['duration'] / pso_duration_adjusted if pso_duration_adjusted > 0 else float('inf')
+                'ratio': mcmc_results['duration'] / pso_results['duration'] if pso_results['duration'] > 0 else float('inf')
             },
             'parameter_errors': {
                 'PSO': pso_errors,
@@ -623,10 +692,10 @@ def evaluate_results(pso_results, mcmc_results, actual_params, data_dict):
 
     except Exception as e:
         print(f"Error in evaluate_results: {str(e)}")
-        # Return a minimal comparison structure
+        # Return minimal comparison structure
         return {
             'execution_time': {
-                'PSO': pso_results.get('duration', 0), 
+                'PSO': pso_results.get('duration', 0),
                 'MCMC': mcmc_results.get('duration', 0),
                 'ratio': 1.0
             },
@@ -651,10 +720,10 @@ def generate_comparison_plots(pso_results, mcmc_results, data_dict, comparison, 
 
     try:
         # Get data as numpy arrays for plotting
-        t_np = cp.asnumpy(data_dict['t']) if isinstance(data_dict['t'], cp.ndarray) else data_dict['t']
-        dataY_np = cp.asnumpy(data_dict['dataY']) if isinstance(data_dict['dataY'], cp.ndarray) else data_dict['dataY']
-        dataY_only_signal_np = cp.asnumpy(data_dict['dataY_only_signal']) if isinstance(data_dict['dataY_only_signal'],
-                                                                                        cp.ndarray) else data_dict[
+        t_np = np.asarray(data_dict['t']) if not isinstance(data_dict['t'], np.ndarray) else data_dict['t']
+        dataY_np = np.asarray(data_dict['dataY']) if not isinstance(data_dict['dataY'], np.ndarray) else data_dict['dataY']
+        dataY_only_signal_np = np.asarray(data_dict['dataY_only_signal']) if not isinstance(data_dict['dataY_only_signal'],
+                                                                                        np.ndarray) else data_dict[
             'dataY_only_signal']
 
         # 1. Signal Comparison Plot
@@ -713,7 +782,7 @@ def generate_comparison_plots(pso_results, mcmc_results, data_dict, comparison, 
         plt.savefig(f"{results_dir}/parameter_errors.png", bbox_inches='tight')
         plt.close()
 
-        # 4. Execution Time Comparison (using adjusted PSO time)
+        # 4. Execution Time Comparison
         plt.figure(figsize=(8, 6), dpi=200)
         plt.bar(['PSO', 'Bilby MCMC'],
                 [comparison['execution_time']['PSO'], comparison['execution_time']['MCMC']],
@@ -725,228 +794,6 @@ def generate_comparison_plots(pso_results, mcmc_results, data_dict, comparison, 
             plt.text(i, v + 1, f"{v:.2f}s", ha='center')
         plt.savefig(f"{results_dir}/execution_time.png", bbox_inches='tight')
         plt.close()
-
-        # 5. NEW: Algorithm Performance vs Iterations Plot
-        plt.figure(figsize=(12, 8), dpi=200)
-        
-        # Plot PSO iteration history
-        if pso_results['iteration_history']:
-            pso_iterations = range(len(pso_results['iteration_history']))
-            plt.subplot(2, 1, 1)
-            plt.plot(pso_iterations, pso_results['iteration_history'], 'r-', linewidth=2, label='PSO Fitness')
-            plt.title('PSO Algorithm Performance vs Iterations')
-            plt.xlabel('Iteration')
-            plt.ylabel('Fitness Value')
-            plt.grid(True, alpha=0.3)
-            plt.legend()
-            
-        # Plot MCMC iteration history
-        if mcmc_results['iteration_history']:
-            mcmc_iterations = range(len(mcmc_results['iteration_history']))
-            plt.subplot(2, 1, 2)
-            plt.plot(mcmc_iterations, mcmc_results['iteration_history'], 'b-', linewidth=2, label='MCMC Log Likelihood')
-            plt.title('MCMC Algorithm Performance vs Iterations')
-            plt.xlabel('Iteration')
-            plt.ylabel('Log Likelihood')
-            plt.grid(True, alpha=0.3)
-            plt.legend()
-            
-        plt.tight_layout()
-        plt.savefig(f"{results_dir}/algorithm_performance_vs_iterations.png", bbox_inches='tight')
-        plt.close()
-
-        # 6. NEW: Combined Performance Comparison Plot
-        plt.figure(figsize=(12, 6), dpi=200)
-        
-        if pso_results['iteration_history'] and mcmc_results['iteration_history']:
-            # Normalize iterations to same scale for comparison
-            max_len = max(len(pso_results['iteration_history']), len(mcmc_results['iteration_history']))
-            
-            # Normalize PSO fitness (invert to make higher better)
-            pso_normalized = np.array(pso_results['iteration_history'])
-            if len(pso_normalized) > 0:
-                pso_normalized = (pso_normalized - np.min(pso_normalized)) / (np.max(pso_normalized) - np.min(pso_normalized))
-            
-            # Normalize MCMC log likelihood
-            mcmc_normalized = np.array(mcmc_results['iteration_history'])
-            if len(mcmc_normalized) > 0:
-                mcmc_normalized = (mcmc_normalized - np.min(mcmc_normalized)) / (np.max(mcmc_normalized) - np.min(mcmc_normalized))
-            
-            # Create normalized iteration arrays
-            pso_iter_norm = np.linspace(0, 1, len(pso_normalized))
-            mcmc_iter_norm = np.linspace(0, 1, len(mcmc_normalized))
-            
-            plt.plot(pso_iter_norm, pso_normalized, 'r-', linewidth=2, label='PSO (Normalized)', alpha=0.8)
-            plt.plot(mcmc_iter_norm, mcmc_normalized, 'b-', linewidth=2, label='MCMC (Normalized)', alpha=0.8)
-            
-            plt.title('Algorithm Performance Comparison (Normalized)')
-            plt.xlabel('Normalized Iteration Progress')
-            plt.ylabel('Normalized Performance')
-            plt.legend()
-            plt.grid(True, alpha=0.3)
-            plt.savefig(f"{results_dir}/combined_performance_comparison.png", bbox_inches='tight')
-        plt.close()
-
-        # 7. Create summary table as image
-        # Generate summary dataframe
-        summary_data = {
-            'Metric': [
-                'Execution Time (s)',
-                'Speed Improvement',
-                'SNR',
-                'Match (Signal Quality)',
-                'Final Match',
-                'Distance Error (%)',
-                'Chirp Mass Error (%)',
-                'Merger Time Error (%)',
-                'Phase Error (%)',
-                'Flux Ratio Error (%)',
-                'Time Delay Error (%)',
-                'Classification',
-            ],
-            'PSO': [
-                f"{comparison['execution_time']['PSO']:.2f}",
-                f"{comparison['execution_time']['ratio']:.2f}x faster",
-                f"{comparison['signal_quality']['PSO']['SNR']:.2f}",
-                f"{comparison['signal_quality']['PSO']['match']:.4f}",
-                f"{comparison['signal_quality']['PSO']['match_final']:.4f}",
-                f"{comparison['parameter_errors']['PSO']['r'] * 100:.2f}",
-                f"{comparison['parameter_errors']['PSO']['m_c'] * 100:.2f}",
-                f"{comparison['parameter_errors']['PSO']['tc'] * 100:.2f}",
-                f"{comparison['parameter_errors']['PSO']['phi_c'] * 100:.2f}",
-                f"{comparison['parameter_errors']['PSO']['A'] * 100:.2f}",
-                f"{comparison['parameter_errors']['PSO']['delta_t'] * 100:.2f}",
-                comparison['classification']['PSO']['classification'],
-            ],
-            'Bilby MCMC': [
-                f"{comparison['execution_time']['MCMC']:.2f}",
-                "baseline",
-                f"{comparison['signal_quality']['MCMC']['SNR']:.2f}",
-                f"{comparison['signal_quality']['MCMC']['match']:.4f}",
-                f"{comparison['signal_quality']['MCMC']['match_final']:.4f}",
-                f"{comparison['parameter_errors']['MCMC']['r'] * 100:.2f}",
-                f"{comparison['parameter_errors']['MCMC']['m_c'] * 100:.2f}",
-                f"{comparison['parameter_errors']['MCMC']['tc'] * 100:.2f}",
-                f"{comparison['parameter_errors']['MCMC']['phi_c'] * 100:.2f}",
-                f"{comparison['parameter_errors']['MCMC']['A'] * 100:.2f}",
-                f"{comparison['parameter_errors']['MCMC']['delta_t'] * 100:.2f}",
-                comparison['classification']['MCMC']['classification'],
-            ]
-        }
-
-        summary_df = pd.DataFrame(summary_data)
-
-        # Create figure and save as image
-        fig, ax = plt.subplots(figsize=(12, 8), dpi=200)
-        ax.axis('off')
-
-        # Create table
-        table = ax.table(
-            cellText=summary_df.values,
-            colLabels=summary_df.columns,
-            cellLoc='center',
-            loc='center',
-            colWidths=[0.4, 0.3, 0.3]
-        )
-
-        # Style the table
-        table.auto_set_font_size(False)
-        table.set_fontsize(10)
-        table.scale(1, 1.5)
-
-        # Add title
-        plt.title('PSO vs Bilby MCMC Performance Comparison Summary', fontsize=16, pad=20)
-
-        # Color code cells based on which method performs better
-        for i in range(1, len(summary_df)):
-            # Skip non-comparable rows
-            if i == 1:  # Speed improvement row
-                continue
-
-            pso_val = summary_df.iloc[i, 1]
-            mcmc_val = summary_df.iloc[i, 2]
-
-            # Try to extract numerical values where possible
-            try:
-                pso_num = float(pso_val.split()[0])
-                mcmc_num = float(mcmc_val.split()[0])
-
-                # Determine which is better (for error metrics, lower is better)
-                if i >= 5 and i <= 10:  # Error metrics
-                    if pso_num < mcmc_num:
-                        table[(i + 1, 1)].set_facecolor('#d4f7d4')  # Light green
-                        table[(i + 1, 2)].set_facecolor('#ffcccc')  # Light red
-                    elif pso_num > mcmc_num:
-                        table[(i + 1, 1)].set_facecolor('#ffcccc')
-                        table[(i + 1, 2)].set_facecolor('#d4f7d4')
-                else:  # Other metrics, higher is better
-                    if pso_num > mcmc_num:
-                        table[(i + 1, 1)].set_facecolor('#d4f7d4')
-                        table[(i + 1, 2)].set_facecolor('#ffcccc')
-                    elif pso_num < mcmc_num:
-                        table[(i + 1, 1)].set_facecolor('#ffcccc')
-                        table[(i + 1, 2)].set_facecolor('#d4f7d4')
-            except (ValueError, IndexError):
-                # Skip rows that can't be converted to numbers
-                continue
-
-        plt.tight_layout()
-        plt.savefig(f"{results_dir}/comparison_summary.png", bbox_inches='tight')
-        plt.close()
-
-        # 8. Save actual vs estimated parameters as CSV
-        param_df = pd.DataFrame({
-            'Parameter': [
-                'Distance (Mpc)',
-                'Chirp Mass (M⊙)',
-                'Merger Time (s)',
-                'Phase (rad/π)',
-                'Flux Ratio (A)',
-                'Time Delay (s)'
-            ],
-            'Actual': [
-                actual_params['source_distance'],
-                actual_params['chirp_mass'],
-                actual_params['merger_time'],
-                actual_params['phase'],
-                actual_params['flux_ratio'],
-                actual_params['time_delay']
-            ],
-            'PSO Estimate': [
-                10 ** float(pso_results['best_params']['r']),
-                10 ** float(pso_results['best_params']['m_c']),
-                float(pso_results['best_params']['tc']),
-                float(pso_results['best_params']['phi_c']) / np.pi,
-                float(pso_results['best_params']['A']),
-                float(pso_results['best_params']['delta_t'])
-            ],
-            'Bilby MCMC Estimate': [
-                10 ** float(mcmc_results['best_params']['r']),
-                10 ** float(mcmc_results['best_params']['m_c']),
-                float(mcmc_results['best_params']['tc']),
-                float(mcmc_results['best_params']['phi_c']) / np.pi,
-                float(mcmc_results['best_params']['A']),
-                float(mcmc_results['best_params']['delta_t'])
-            ],
-            'PSO Error (%)': [
-                comparison['parameter_errors']['PSO']['r'] * 100,
-                comparison['parameter_errors']['PSO']['m_c'] * 100,
-                comparison['parameter_errors']['PSO']['tc'] * 100,
-                comparison['parameter_errors']['PSO']['phi_c'] * 100,
-                comparison['parameter_errors']['PSO']['A'] * 100,
-                comparison['parameter_errors']['PSO']['delta_t'] * 100
-            ],
-            'Bilby MCMC Error (%)': [
-                comparison['parameter_errors']['MCMC']['r'] * 100,
-                comparison['parameter_errors']['MCMC']['m_c'] * 100,
-                comparison['parameter_errors']['MCMC']['tc'] * 100,
-                comparison['parameter_errors']['MCMC']['phi_c'] * 100,
-                comparison['parameter_errors']['MCMC']['A'] * 100,
-                comparison['parameter_errors']['MCMC']['delta_t'] * 100
-            ]
-        })
-
-        param_df.to_csv(f"{results_dir}/parameter_comparison.csv", index=False)
 
         print(f"All comparison plots saved to {results_dir} directory")
 
@@ -972,14 +819,14 @@ def main():
         pso_results = run_pso(data_dict, pso_params, pso_config, actual_params)
 
         # Run Bilby MCMC with parameters to match PSO computational effort
-        # PSO: 100 particles × 3000 iterations = 300,000 evaluations
-        # MCMC: 500 live points × 600 iterations = 300,000 evaluations
-        mcmc_results = run_bilby_mcmc(data_dict, param_ranges, n_live_points=500, n_iter=600)
+        # PSO: 80 particles × 2000 iterations = 160,000 evaluations
+        # MCMC: 400 live points × 400 iterations = 160,000 evaluations
+        mcmc_results = run_bilby_mcmc(data_dict, param_ranges, n_live_points=400, n_iter=400)
 
         # Evaluate and compare results
         comparison = evaluate_results(pso_results, mcmc_results, actual_params, data_dict)
 
-        # Generate comparison plots - pass param_ranges explicitly to avoid scope issues
+        # Generate comparison plots
         generate_comparison_plots(pso_results, mcmc_results, data_dict, comparison, actual_params, param_ranges)
 
         # Save comparison summary
@@ -1012,7 +859,7 @@ def main():
         print("\nComparison complete! Results saved in the comparison_results directory.")
         print(f"PSO is {comparison['execution_time']['ratio']:.2f}x faster than Bilby MCMC")
 
-        # Return final message based on overall comparison
+        # Generate final message based on overall comparison
         pso_wins = 0
         mcmc_wins = 0
 

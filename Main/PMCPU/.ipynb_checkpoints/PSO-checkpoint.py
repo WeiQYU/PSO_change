@@ -1,8 +1,7 @@
-import cupy as cp
-from cupyx.scipy.fftpack import fft
+import numpy as np
+from scipy.fftpack import fft
 from pycbc.types import FrequencySeries, TimeSeries
 from tqdm import tqdm
-import numpy as np
 import pycbc.types
 from pycbc.filter import match, matched_filter
 import scipy.constants as const
@@ -61,23 +60,23 @@ def generate_unlensed_gw(dataX, r, m_c, tc, phi_c):
     r = (10 ** r) * 1e6 * pc  # Distance (meters)
     m_c = (10 ** m_c) * M_sun  # Combined mass (kg)
 
-    # Ensure input is CuPy array
-    if not isinstance(dataX, cp.ndarray):
-        dataX_gpu = cp.asarray(dataX)
+    # Ensure input is NumPy array
+    if not isinstance(dataX, np.ndarray):
+        dataX_cpu = np.asarray(dataX)
     else:
-        dataX_gpu = dataX
+        dataX_cpu = dataX
 
     # Generate gravitational wave signal
-    t = dataX_gpu  # Time series
+    t = dataX_cpu  # Time series
 
     # Calculate signal in valid region before merger
     valid_idx = t < tc
     t_valid = t[valid_idx]
 
     # Initialize waveform
-    h = cp.zeros_like(t)
+    h = np.zeros_like(t)
 
-    if cp.sum(valid_idx) > 0:  # Ensure there's a valid region
+    if np.sum(valid_idx) > 0:  # Ensure there's a valid region
         # Calculate frequency evolution parameter Theta
         Theta = c ** 3 * (tc - t_valid) / (5 * G * m_c)
 
@@ -88,7 +87,7 @@ def generate_unlensed_gw(dataX, r, m_c, tc, phi_c):
         phase = 2 * phi_c - 2 * Theta ** (5 / 8)
 
         # Generate waveform
-        h[valid_idx] = A_gw * cp.cos(phase)
+        h[valid_idx] = A_gw * np.cos(phase)
 
     return h
 
@@ -117,23 +116,23 @@ def apply_lensing_effect(h, t, A, delta_t, tc):
     """
     # Calculate FFT of signal
     n = len(h)
-    h_fft = cp.fft.fft(h)
+    h_fft = np.fft.fft(h)
 
     # Calculate frequency array
     dt = t[1] - t[0]  # Sampling interval
     fs = 1 / dt  # Sampling frequency
-    freqs = cp.fft.fftfreq(n, dt)
+    freqs = np.fft.fftfreq(n, dt)
 
     # Calculate lens transfer function F(f) = 1 + A * exp(i * Phi)
     # where Phi = 2πf * delta_t
-    Phi = 2 * cp.pi * freqs * delta_t
-    lens_transfer = 1 + A * cp.exp(1j * Phi)
+    Phi = 2 * np.pi * freqs * delta_t
+    lens_transfer = 1 + A * np.exp(1j * Phi)
 
     # Apply lensing effect in frequency domain
     h_lensed_fft = h_fft * lens_transfer
 
     # Convert back to time domain
-    h_lens = cp.real(cp.fft.ifft(h_lensed_fft))
+    h_lens = np.real(np.fft.ifft(h_lensed_fft))
 
     # Ensure signal is zero after merger time
     h_lens[t > tc] = 0
@@ -174,9 +173,9 @@ def crcbgenqcsig(dataX, r, m_c, tc, phi_c, A, delta_t, use_lensing=True):
 
     # Apply lensing effect if needed
     if use_lensing:
-        # Ensure input is CuPy array
-        if not isinstance(dataX, cp.ndarray):
-            t = cp.asarray(dataX)
+        # Ensure input is NumPy array
+        if not isinstance(dataX, np.ndarray):
+            t = np.asarray(dataX)
         else:
             t = dataX
 
@@ -206,12 +205,12 @@ def pycbc_calculate_match(signal1, signal2, fs, psd):
         Match value between signals
     """
     # Ensure data is NumPy arrays
-    if isinstance(signal1, cp.ndarray):
-        signal1 = cp.asnumpy(signal1)
-    if isinstance(signal2, cp.ndarray):
-        signal2 = cp.asnumpy(signal2)
-    if isinstance(psd, cp.ndarray):
-        psd = cp.asnumpy(psd)
+    if not isinstance(signal1, np.ndarray):
+        signal1 = np.asarray(signal1)
+    if not isinstance(signal2, np.ndarray):
+        signal2 = np.asarray(signal2)
+    if not isinstance(psd, np.ndarray):
+        psd = np.asarray(psd)
 
     # Create PyCBC TimeSeries objects
     delta_t = 1.0 / fs
@@ -356,9 +355,9 @@ def two_step_matching(params, dataY, psdHigh, sampFreq, actual_params=None):
     # Compare with actual parameters if provided (for evaluation only)
     if actual_params is not None:
         # Convert parameters to the same units for comparison
-        actual_r_log10 = cp.log10(actual_params.get('source_distance', 0)) if actual_params.get('source_distance',
+        actual_r_log10 = np.log10(actual_params.get('source_distance', 0)) if actual_params.get('source_distance',
                                                                                                 0) > 0 else 0
-        actual_m_c_log10 = cp.log10(actual_params.get('chirp_mass', 0)) if actual_params.get('chirp_mass', 0) > 0 else 0
+        actual_m_c_log10 = np.log10(actual_params.get('chirp_mass', 0)) if actual_params.get('chirp_mass', 0) > 0 else 0
 
         # Calculate relative errors
         param_errors = {
@@ -367,8 +366,8 @@ def two_step_matching(params, dataY, psdHigh, sampFreq, actual_params=None):
                                  10 ** m_c - 10 ** actual_m_c_log10) / 10 ** actual_m_c_log10 if actual_m_c_log10 > 0 else float(
                 'inf'),
             'tc_error': (tc - actual_params.get('merger_time', 0)) / actual_params.get('merger_time', 1),
-            'phi_c_error': min(abs(phi_c - actual_params.get('phase', 0) * 2 * cp.pi),
-                               abs(phi_c - actual_params.get('phase', 0) * 2 * cp.pi - 2 * cp.pi)) / (2 * cp.pi),
+            'phi_c_error': min(abs(phi_c - actual_params.get('phase', 0) * 2 * np.pi),
+                               abs(phi_c - actual_params.get('phase', 0) * 2 * np.pi - 2 * np.pi)) / (2 * np.pi),
             'A_error': (A - actual_params.get('flux_ratio', 0)) / actual_params.get('flux_ratio', 1),
             'delta_t_error': (delta_t - actual_params.get('time_delay', 0)) / actual_params.get('time_delay', 1),
             'classification_correct': (result['is_lensed'] == (actual_params.get('flux_ratio', 0) >= 0.01))
@@ -386,7 +385,7 @@ def two_step_matching(params, dataY, psdHigh, sampFreq, actual_params=None):
                 'm_c': {'estimated': m_c, 'actual_log10': actual_m_c_log10,
                         'actual': 10 ** actual_m_c_log10 if actual_m_c_log10 > 0 else 0},
                 'tc': {'estimated': tc, 'actual': actual_params.get('merger_time', 0)},
-                'phi_c': {'estimated': phi_c, 'actual_radians': actual_params.get('phase', 0) * 2 * cp.pi},
+                'phi_c': {'estimated': phi_c, 'actual_radians': actual_params.get('phase', 0) * 2 * np.pi},
                 'A': {'estimated': A, 'actual': actual_params.get('flux_ratio', 0)},
                 'delta_t': {'estimated': delta_t, 'actual': actual_params.get('time_delay', 0)}
             }
@@ -406,18 +405,18 @@ def two_step_matching(params, dataY, psdHigh, sampFreq, actual_params=None):
 def calculate_matched_filter_snr(signal, template, psd, fs):
     """计算匹配滤波SNR，使用template作为模板"""
     # 确保数据是NumPy数组
-    if isinstance(signal, cp.ndarray):
-        signal_np = cp.asnumpy(signal)
+    if not isinstance(signal, np.ndarray):
+        signal_np = np.asarray(signal)
     else:
         signal_np = signal
 
-    if isinstance(template, cp.ndarray):
-        template_np = cp.asnumpy(template)
+    if not isinstance(template, np.ndarray):
+        template_np = np.asarray(template)
     else:
         template_np = template
 
-    if isinstance(psd, cp.ndarray):
-        psd_np = cp.asnumpy(psd)
+    if not isinstance(psd, np.ndarray):
+        psd_np = np.asarray(psd)
     else:
         psd_np = psd
 
@@ -461,16 +460,16 @@ def crcbqcpsopsd(inParams, psoParams, nRuns, use_two_step=True, actual_params=No
     outStruct : list
         Detailed results of each PSO run
     """
-    # Transfer data to GPU
-    inParams['dataX'] = cp.asarray(inParams['dataX'])
-    inParams['dataY'] = cp.asarray(inParams['dataY'])
-    inParams['psdHigh'] = cp.asarray(inParams['psdHigh'])
-    inParams['rmax'] = cp.asarray(inParams['rmax'])
-    inParams['rmin'] = cp.asarray(inParams['rmin'])
+    # Transfer data to CPU (convert from CuPy if needed)
+    inParams['dataX'] = np.asarray(inParams['dataX'])
+    inParams['dataY'] = np.asarray(inParams['dataY'])
+    inParams['psdHigh'] = np.asarray(inParams['psdHigh'])
+    inParams['rmax'] = np.asarray(inParams['rmax'])
+    inParams['rmin'] = np.asarray(inParams['rmin'])
 
     # Add signal-only data if provided
     if 'dataY_only_signal' in inParams:
-        inParams['dataY_only_signal'] = cp.asarray(inParams['dataY_only_signal'])
+        inParams['dataY_only_signal'] = np.asarray(inParams['dataY_only_signal'])
     else:
         inParams['dataY_only_signal'] = inParams['dataY']  # Use full data if signal-only not provided
 
@@ -490,7 +489,7 @@ def crcbqcpsopsd(inParams, psoParams, nRuns, use_two_step=True, actual_params=No
         'allRunsOutput': [],
         'bestRun': None,
         'bestFitness': None,
-        'bestSig': cp.zeros(nSamples),
+        'bestSig': np.zeros(nSamples),
         'r': None,
         'm_c': None,
         'tc': None,
@@ -512,14 +511,14 @@ def crcbqcpsopsd(inParams, psoParams, nRuns, use_two_step=True, actual_params=No
 
         # Set different random seeds to ensure different results in multiple runs
         seed_value = int(time.time()) + lpruns * 1000
-        cp.random.seed(seed_value)
+        np.random.seed(seed_value)
 
         outStruct[lpruns] = crcbpso(fHandle, nDim, **currentPSOParams)
 
         print(f"Run {lpruns + 1} completed with best fitness: {outStruct[lpruns]['bestFitness']}")
 
     # Process results from all runs
-    fitVal = cp.zeros(nRuns)
+    fitVal = np.zeros(nRuns)
     for lpruns in range(nRuns):
         allRunsOutput = {
             'fitVal': 0,
@@ -529,7 +528,7 @@ def crcbqcpsopsd(inParams, psoParams, nRuns, use_two_step=True, actual_params=No
             'phi_c': 0,
             'A': 0,
             'delta_t': 0,
-            'estSig': cp.zeros(nSamples),
+            'estSig': np.zeros(nSamples),
             'totalFuncEvals': [],
             'is_lensed': False,
             'lensing_message': "",
@@ -538,7 +537,7 @@ def crcbqcpsopsd(inParams, psoParams, nRuns, use_two_step=True, actual_params=No
         fitVal[lpruns] = outStruct[lpruns]['bestFitness']
 
         # Ensure dimensions are handled correctly
-        bestLocation = cp.asarray(outStruct[lpruns]['bestLocation'])
+        bestLocation = np.asarray(outStruct[lpruns]['bestLocation'])
         if bestLocation.ndim == 1:
             bestLocation = bestLocation.reshape(1, -1)  # Ensure 2D shape (1, nDim)
 
@@ -548,12 +547,12 @@ def crcbqcpsopsd(inParams, psoParams, nRuns, use_two_step=True, actual_params=No
         # Handle parameter dimensions
         if isinstance(params, list) and len(params) > 0:
             params = params[0]
-        elif isinstance(params, cp.ndarray) and params.ndim > 1 and params.shape[0] == 1:
+        elif isinstance(params, np.ndarray) and params.ndim > 1 and params.shape[0] == 1:
             params = params[0]
 
         # Convert to numpy if needed
-        if isinstance(params, cp.ndarray):
-            params = cp.asnumpy(params)
+        if not isinstance(params, np.ndarray):
+            params = np.asarray(params)
 
         r, m_c, tc, phi_c, A, delta_t = params
 
@@ -632,20 +631,20 @@ def crcbqcpsopsd(inParams, psoParams, nRuns, use_two_step=True, actual_params=No
             actual_comparison = {}
 
         # Calculate SNR using matched filtering against the pure signal
-        run_sig = cp.real(estSig)
+        run_sig = np.real(estSig)
         run_snr_pycbc = calculate_matched_filter_snr(run_sig, inParams['dataY_only_signal'],
                                                      inParams['psdHigh'], inParams['sampFreq'])
 
         # Update output with SNR calculation and enhanced metrics
         allRunsOutput.update({
-            'fitVal': float(fitVal[lpruns].get()) if hasattr(fitVal[lpruns], 'get') else float(fitVal[lpruns]),
+            'fitVal': float(fitVal[lpruns]),
             'r': r,
             'm_c': m_c,
             'tc': tc,
             'phi_c': phi_c,
             'A': A,
             'delta_t': delta_t,
-            'estSig': cp.asarray(estSig),
+            'estSig': np.asarray(estSig),
             'totalFuncEvals': outStruct[lpruns]['totalFuncEvals'],
             'is_lensed': is_lensed,
             'lensing_message': lensing_message,
@@ -659,10 +658,7 @@ def crcbqcpsopsd(inParams, psoParams, nRuns, use_two_step=True, actual_params=No
         outResults['allRunsOutput'].append(allRunsOutput)
 
     # Find best run
-    if hasattr(fitVal, 'get'):
-        fitVal_np = cp.asnumpy(fitVal)
-    else:
-        fitVal_np = fitVal
+    fitVal_np = fitVal
 
     bestRun = np.argmin(fitVal_np)
     outResults.update({
@@ -724,50 +720,50 @@ def crcbpso(fitfuncHandle, nDim, **kwargs):
 
     # Ensure random number reproducibility
     if 'seed' in psoParams:
-        cp.random.seed(psoParams['seed'])
+        np.random.seed(psoParams['seed'])
 
     # Initialize return data structure
     returnData = {
         'totalFuncEvals': 0,
-        'bestLocation': cp.zeros((1, nDim)),
-        'bestFitness': cp.inf,
+        'bestLocation': np.zeros((1, nDim)),
+        'bestFitness': np.inf,
         'fitnessHistory': []  # Record fitness history for plotting
     }
 
     # Standard initialization strategy
     if psoParams['init_strategy'] == 'uniform':
         # Standard uniform initialization
-        particles = cp.random.rand(psoParams['popsize'], nDim)
+        particles = np.random.rand(psoParams['popsize'], nDim)
     elif psoParams['init_strategy'] == 'gaussian':
         # Gaussian initialization around the middle of the range
-        particles = cp.random.normal(0.5, 0.15, (psoParams['popsize'], nDim))
-        particles = cp.clip(particles, 0, 1)  # Clip to [0,1] range
+        particles = np.random.normal(0.5, 0.15, (psoParams['popsize'], nDim))
+        particles = np.clip(particles, 0, 1)  # Clip to [0,1] range
     elif psoParams['init_strategy'] == 'sobol':
         # Basic quasi-random initialization with segment division
-        particles = cp.zeros((psoParams['popsize'], nDim))
+        particles = np.zeros((psoParams['popsize'], nDim))
         for i in range(psoParams['popsize']):
             for j in range(nDim):
                 segment = i % 10  # Divide range into 10 segments
-                particles[i, j] = (segment / 10) + cp.random.rand() / 10
+                particles[i, j] = (segment / 10) + np.random.rand() / 10
     elif psoParams['init_strategy'] == 'boundary':
         # Boundary-biased initialization (more particles near boundaries)
-        particles = cp.zeros((psoParams['popsize'], nDim))
+        particles = np.zeros((psoParams['popsize'], nDim))
         for i in range(psoParams['popsize']):
             if i % 3 == 0:  # 1/3 of particles near lower boundary
-                particles[i] = cp.random.rand(nDim) * 0.3
+                particles[i] = np.random.rand(nDim) * 0.3
             elif i % 3 == 1:  # 1/3 of particles near upper boundary
-                particles[i] = 0.7 + cp.random.rand(nDim) * 0.3
+                particles[i] = 0.7 + np.random.rand(nDim) * 0.3
             else:  # 1/3 of particles uniformly distributed
-                particles[i] = cp.random.rand(nDim)
+                particles[i] = np.random.rand(nDim)
     else:
         # Default to uniform distribution
-        particles = cp.random.rand(psoParams['popsize'], nDim)
+        particles = np.random.rand(psoParams['popsize'], nDim)
 
     # Initialize velocities - smaller initial velocities
-    velocities = cp.random.uniform(-0.05, 0.05, (psoParams['popsize'], nDim))
+    velocities = np.random.uniform(-0.05, 0.05, (psoParams['popsize'], nDim))
 
     # Evaluate initial fitness
-    fitness = cp.zeros(psoParams['popsize'])
+    fitness = np.zeros(psoParams['popsize'])
     for i in range(psoParams['popsize']):
         fitness[i] = fitfuncHandle(particles[i:i + 1], returnxVec=0)
 
@@ -776,7 +772,7 @@ def crcbpso(fitfuncHandle, nDim, **kwargs):
     pbest_fitness = fitness.copy()
 
     # Find global best
-    gbest_idx = cp.argmin(pbest_fitness)
+    gbest_idx = np.argmin(pbest_fitness)
     gbest = pbest[gbest_idx].copy()
     gbest_fitness = pbest_fitness[gbest_idx].copy()
 
@@ -804,13 +800,13 @@ def crcbpso(fitfuncHandle, nDim, **kwargs):
             # Velocity reset to escape local optima
             if step > 0 and step % 30 == 0:
                 # Reset velocity for 25% of particles
-                reset_indices = cp.random.choice(psoParams['popsize'], size=psoParams['popsize'] // 4, replace=False)
+                reset_indices = np.random.choice(psoParams['popsize'], size=psoParams['popsize'] // 4, replace=False)
                 for idx in reset_indices:
-                    velocities[idx] = cp.random.uniform(-0.4, 0.4, nDim)
+                    velocities[idx] = np.random.uniform(-0.4, 0.4, nDim)
 
                 # Periodically change inertia weight to increase search diversity
                 if step % 100 == 0:
-                    w = cp.random.uniform(psoParams['w_end'], psoParams['w_start'])
+                    w = np.random.uniform(psoParams['w_end'], psoParams['w_start'])
 
             # Update each particle
             for i in range(psoParams['popsize']):
@@ -820,15 +816,15 @@ def crcbpso(fitfuncHandle, nDim, **kwargs):
                     idx = (i + j) % psoParams['popsize']
                     neighbors.append(idx)
 
-                # Use numpy's argmin instead of cupy's argmin because neighbors is a Python list
+                # Use numpy's argmin for neighbors
                 neighbor_fitness = [float(pbest_fitness[n]) for n in neighbors]
                 best_neighbor_idx = np.argmin(neighbor_fitness)
                 lbest_idx = neighbors[best_neighbor_idx]
                 lbest = pbest[lbest_idx].copy()
 
                 # Generate random coefficients
-                r1 = cp.random.rand(nDim)
-                r2 = cp.random.rand(nDim)
+                r1 = np.random.rand(nDim)
+                r2 = np.random.rand(nDim)
 
                 # Standard velocity update
                 velocities[i] = (w * velocities[i] +
@@ -839,7 +835,7 @@ def crcbpso(fitfuncHandle, nDim, **kwargs):
                 max_vel = psoParams['max_velocity'] * (1 - 0.3 * step / psoParams['maxSteps'])
 
                 # Standard uniform velocity limit
-                velocities[i] = cp.clip(velocities[i], -max_vel, max_vel)
+                velocities[i] = np.clip(velocities[i], -max_vel, max_vel)
 
                 # Update position
                 particles[i] += velocities[i]
@@ -849,14 +845,14 @@ def crcbpso(fitfuncHandle, nDim, **kwargs):
                 out_low = particles[i] < 0
                 out_high = particles[i] > 1
 
-                particles[i] = cp.where(out_low, -particles[i], particles[i])
-                particles[i] = cp.where(out_high, 2 - particles[i], particles[i])
+                particles[i] = np.where(out_low, -particles[i], particles[i])
+                particles[i] = np.where(out_high, 2 - particles[i], particles[i])
 
                 # Ensure position is in [0,1] range (prevent numerical errors)
-                particles[i] = cp.clip(particles[i], 0, 1)
+                particles[i] = np.clip(particles[i], 0, 1)
 
                 # Reverse velocity at boundaries
-                velocities[i] = cp.where(out_low | out_high, -velocities[i], velocities[i])
+                velocities[i] = np.where(out_low | out_high, -velocities[i], velocities[i])
 
                 # Evaluate new position
                 new_fitness = fitfuncHandle(particles[i:i + 1], returnxVec=0)
@@ -869,7 +865,7 @@ def crcbpso(fitfuncHandle, nDim, **kwargs):
                     pbest_fitness[i] = new_fitness
 
             # Update global best
-            current_best_idx = cp.argmin(pbest_fitness)
+            current_best_idx = np.argmin(pbest_fitness)
             if pbest_fitness[current_best_idx] < gbest_fitness:
                 gbest = pbest[current_best_idx].copy()
                 gbest_fitness = pbest_fitness[current_best_idx].copy()
@@ -905,7 +901,7 @@ def crcbpso(fitfuncHandle, nDim, **kwargs):
             # More aggressive particle reinitialization strategy to break out of local optima
             if step > 0 and step % 40 == 0:
                 # Find the worst 20% of particles
-                worst_indices = cp.argsort(fitness)[-psoParams['popsize'] // 5:]
+                worst_indices = np.argsort(fitness)[-psoParams['popsize'] // 5:]
 
                 # Standard reset logic
                 for idx in worst_indices:
@@ -913,26 +909,26 @@ def crcbpso(fitfuncHandle, nDim, **kwargs):
                     init_method = step % 5
                     if init_method == 0:
                         # Uniform random
-                        particles[idx] = cp.random.rand(nDim)
+                        particles[idx] = np.random.rand(nDim)
                     elif init_method == 1:
                         # Add noise around global best
-                        particles[idx] = cp.clip(gbest + cp.random.normal(0, 0.3, nDim), 0, 1)
+                        particles[idx] = np.clip(gbest + np.random.normal(0, 0.3, nDim), 0, 1)
                     elif init_method == 2:
                         # Explore near boundaries
-                        if cp.random.rand() < 0.5:  # Simple coin flip
-                            particles[idx] = cp.random.uniform(0, 0.2, nDim)
+                        if np.random.rand() < 0.5:  # Simple coin flip
+                            particles[idx] = np.random.uniform(0, 0.2, nDim)
                         else:
-                            particles[idx] = cp.random.uniform(0.8, 1.0, nDim)
+                            particles[idx] = np.random.uniform(0.8, 1.0, nDim)
                     elif init_method == 3:
                         # Large random jumps
-                        particles[idx] = cp.clip(particles[idx] + cp.random.uniform(-0.7, 0.7, nDim), 0, 1)
+                        particles[idx] = np.clip(particles[idx] + np.random.uniform(-0.7, 0.7, nDim), 0, 1)
                     else:
                         # Random sampling within parameter space
                         for j in range(nDim):
-                            particles[idx, j] = cp.random.uniform(0.1, 0.9)
+                            particles[idx, j] = np.random.uniform(0.1, 0.9)
 
                     # Use larger velocity range to improve exploration
-                    velocities[idx] = cp.random.uniform(-0.3, 0.3, nDim)
+                    velocities[idx] = np.random.uniform(-0.3, 0.3, nDim)
 
                     # Evaluate new position
                     fitness[idx] = fitfuncHandle(particles[idx:idx + 1], returnxVec=0)
@@ -941,7 +937,7 @@ def crcbpso(fitfuncHandle, nDim, **kwargs):
     # Update return data when finished
     returnData.update({
         'totalFuncEvals': total_evals,
-        'bestLocation': cp.asnumpy(gbest.reshape(1, -1)),
+        'bestLocation': gbest.reshape(1, -1),
         'bestFitness': float(gbest_fitness)
     })
 
@@ -968,9 +964,9 @@ def glrtqcsig4pso(xVec, params, returnxVec=0):
     xVecReal : array (optional)
         Particle position in real parameter space
     """
-    # Ensure input is CuPy array
-    if isinstance(xVec, np.ndarray):
-        xVec = cp.asarray(xVec)
+    # Ensure input is NumPy array
+    if not isinstance(xVec, np.ndarray):
+        xVec = np.asarray(xVec)
 
     # Ensure input dimensions are correct
     if xVec.ndim == 1:
@@ -981,7 +977,7 @@ def glrtqcsig4pso(xVec, params, returnxVec=0):
     nPoints = xVec.shape[0]
 
     # Initialize fitness array
-    fitVal = cp.full(nPoints, cp.inf)
+    fitVal = np.full(nPoints, np.inf)
 
     # Convert standard range [0,1] to actual parameter range
     xVecReal = s2rv(xVec, params)
@@ -1031,7 +1027,7 @@ def ssrqc(x, params):
     inPrd = innerprodpsd(dataY_templ, qc, params['sampFreq'], params['psdHigh'])
 
     # Return negative squared inner product (to minimize)
-    return -cp.abs(inPrd) ** 2
+    return -np.abs(inPrd) ** 2
 
 
 def normsig4psd(sigVec, sampFreq, psdVec, snr):
@@ -1064,36 +1060,36 @@ def normsig4psd(sigVec, sampFreq, psdVec, snr):
         psd_len = len(psdVec)
         if psd_len < nSamples // 2 + 1:
             # 扩展PSD以覆盖所有正频率
-            extended_psd = cp.zeros(nSamples // 2 + 1)
+            extended_psd = np.zeros(nSamples // 2 + 1)
             extended_psd[:psd_len] = psdVec
             # 用最后一个值填充剩余部分
             extended_psd[psd_len:] = psdVec[-1]
             psdVec = extended_psd
 
         # 为正负频率创建完整的PSD向量
-        psdVec4Norm = cp.zeros(nSamples)
+        psdVec4Norm = np.zeros(nSamples)
         psdVec4Norm[:nSamples // 2 + 1] = psdVec[:nSamples // 2 + 1]  # 正频率
         psdVec4Norm[nSamples // 2 + 1:] = psdVec[1:nSamples // 2][::-1]  # 负频率（镜像）
     else:
         # 处理单值PSD的特殊情况
-        psdVec4Norm = cp.ones(nSamples) * psdVec[0]
+        psdVec4Norm = np.ones(nSamples) * psdVec[0]
 
     # 确保PSD没有零值（避免除以零）
-    min_psd = cp.max(psdVec4Norm) * 1e-14
-    psdVec4Norm = cp.maximum(psdVec4Norm, min_psd)
+    min_psd = np.max(psdVec4Norm) * 1e-14
+    psdVec4Norm = np.maximum(psdVec4Norm, min_psd)
 
     # 计算信号的归一化因子
-    fft_sig = cp.fft.fft(sigVec)
+    fft_sig = np.fft.fft(sigVec)
 
     # 计算归一化平方和
-    normSigSqrd = cp.sum((cp.abs(fft_sig) ** 2) / psdVec4Norm) / (sampFreq * nSamples)
+    normSigSqrd = np.sum((np.abs(fft_sig) ** 2) / psdVec4Norm) / (sampFreq * nSamples)
 
     # 避免除以零或非常小的值
-    if cp.abs(normSigSqrd) < 1e-10:
+    if np.abs(normSigSqrd) < 1e-10:
         normFac = 0
     else:
         # 计算归一化因子
-        normFac = snr / cp.sqrt(cp.abs(normSigSqrd))  # 使用绝对值避免复数问题
+        normFac = snr / np.sqrt(np.abs(normSigSqrd))  # 使用绝对值避免复数问题
 
     return normFac * sigVec, normFac
 
@@ -1133,33 +1129,33 @@ def innerprodpsd(xVec, yVec, sampFreq, psdVals):
         psd_len = len(psdVals)
         if psd_len < nSamples // 2 + 1:
             # 扩展PSD以覆盖所有正频率
-            extended_psd = cp.zeros(nSamples // 2 + 1)
+            extended_psd = np.zeros(nSamples // 2 + 1)
             extended_psd[:psd_len] = psdVals
             # 用最后一个值填充剩余部分
             extended_psd[psd_len:] = psdVals[-1]
             psdVals = extended_psd
 
         # 为正负频率创建完整的PSD向量
-        psdVec4Norm = cp.zeros(nSamples)
+        psdVec4Norm = np.zeros(nSamples)
         psdVec4Norm[:nSamples // 2 + 1] = psdVals[:nSamples // 2 + 1]  # 正频率
         psdVec4Norm[nSamples // 2 + 1:] = psdVals[1:nSamples // 2][::-1]  # 负频率（镜像）
     else:
         # 处理单值PSD的特殊情况
-        psdVec4Norm = cp.ones(nSamples) * psdVals[0]
+        psdVec4Norm = np.ones(nSamples) * psdVals[0]
 
     # 确保PSD没有零值（避免除以零）
-    min_psd = cp.max(psdVec4Norm) * 1e-14
-    psdVec4Norm = cp.maximum(psdVec4Norm, min_psd)
+    min_psd = np.max(psdVec4Norm) * 1e-14
+    psdVec4Norm = np.maximum(psdVec4Norm, min_psd)
 
     # 计算FFT
-    fftX = cp.fft.fft(xVec)
-    fftY = cp.fft.fft(yVec)
+    fftX = np.fft.fft(xVec)
+    fftY = np.fft.fft(yVec)
 
     # 计算内积（匹配滤波）
-    inner_product = cp.sum((fftX * cp.conj(fftY)) / psdVec4Norm) / (sampFreq * nSamples)
+    inner_product = np.sum((fftX * np.conj(fftY)) / psdVec4Norm) / (sampFreq * nSamples)
 
     # 返回实部
-    return cp.real(inner_product)
+    return np.real(inner_product)
 
 
 def s2rv(xVec, params):
@@ -1178,8 +1174,8 @@ def s2rv(xVec, params):
     xVecReal : array
         Particle position in real parameter space
     """
-    rmax = cp.asarray(params['rmax'])
-    rmin = cp.asarray(params['rmin'])
+    rmax = np.asarray(params['rmax'])
+    rmin = np.asarray(params['rmin'])
 
     # Use standard ranges
     return xVec * (rmax - rmin) + rmin
@@ -1199,11 +1195,11 @@ def crcbchkstdsrchrng(xVec):
     valid_pts : array
         Boolean array indicating valid points
     """
-    if not isinstance(xVec, cp.ndarray):
-        xVec = cp.asarray(xVec)
+    if not isinstance(xVec, np.ndarray):
+        xVec = np.asarray(xVec)
 
     # Check if all elements in each row are within [0,1] range
-    return cp.all((xVec >= 0) & (xVec <= 1), axis=1)
+    return np.all((xVec >= 0) & (xVec <= 1), axis=1)
 
 
 def calculate_snr_pycbc(signal, psd, fs):
@@ -1225,10 +1221,10 @@ def calculate_snr_pycbc(signal, psd, fs):
         Maximum SNR value
     """
     # Ensure data is NumPy array
-    if isinstance(signal, cp.ndarray):
-        signal = cp.asnumpy(signal)
-    if isinstance(psd, cp.ndarray):
-        psd = cp.asnumpy(psd)
+    if not isinstance(signal, np.ndarray):
+        signal = np.asarray(signal)
+    if not isinstance(psd, np.ndarray):
+        psd = np.asarray(psd)
 
     # Create PyCBC TimeSeries object
     delta_t = 1.0 / fs
