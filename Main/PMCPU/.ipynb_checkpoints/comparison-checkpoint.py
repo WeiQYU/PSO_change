@@ -32,7 +32,7 @@ M_sun = 1.989e30  # Solar mass, kg
 pc = 3.086e16  # Parsec to meters
 
 # Create results directory
-results_dir = "cpu_results_fixed"
+results_dir = "cpu_results_lens_25w"
 os.makedirs(results_dir, exist_ok=True)
 
 
@@ -42,7 +42,7 @@ def load_data():
 
     # Load noise data
     TrainingData = scio.loadmat('../generate_data/noise.mat')
-    analysisData = scio.loadmat('../generate_data/data_without_lens.mat')
+    analysisData = scio.loadmat('../generate_data/data.mat')
 
     print("Data loaded successfully")
 
@@ -103,8 +103,8 @@ def setup_parameters(data):
 
     # Set up PSO configuration
     pso_config = {
-        'popsize': 80,  # 80 particles
-        'maxSteps': 2000,  # 2000 iterations
+        'popsize': 100,  # 80 particles
+        'maxSteps': 2500,  # 2000 iterations
         'c1': 2.0,  # Individual learning factor
         'c2': 2.0,  # Social learning factor
         'w_start': 0.9,  # Initial inertia weight
@@ -274,7 +274,7 @@ class GWLikelihood(Likelihood):
             return -np.inf
 
 
-def run_bilby_mcmc(data_dict, param_ranges, n_live_points=400, n_iter=2000):
+def run_bilby_mcmc(data_dict, param_ranges, n_live_points=500, n_iter=500):
     """Fixed Bilby MCMC execution function"""
     print("Starting Fixed Bilby MCMC analysis...")
 
@@ -660,7 +660,7 @@ def evaluate_results(pso_results, mcmc_results, actual_params, data_dict):
             'classification': {
                 'PSO': {
                     'is_lensed': pso_results['is_lensed'],
-                    'classification': pso_results['classification'],
+                                        'classification': pso_results['classification'],
                 },
                 'MCMC': {
                     'is_lensed': mcmc_results['is_lensed'],
@@ -714,6 +714,179 @@ def evaluate_results(pso_results, mcmc_results, actual_params, data_dict):
         }
 
 
+def create_parameter_comparison_table(pso_results, mcmc_results, actual_params, param_ranges):
+    """Create a comprehensive parameter comparison table"""
+    print("\nCreating parameter comparison table...")
+    
+    try:
+        # Parameter names and their descriptions
+        param_info = {
+            'r': {'name': 'Distance', 'unit': 'Mpc', 'transform': lambda x: 10**x},
+            'm_c': {'name': 'Chirp Mass', 'unit': 'M☉', 'transform': lambda x: 10**x},
+            'tc': {'name': 'Merger Time', 'unit': 's', 'transform': lambda x: x},
+            'phi_c': {'name': 'Phase', 'unit': 'rad', 'transform': lambda x: x/np.pi},
+            'A': {'name': 'Flux Ratio', 'unit': '', 'transform': lambda x: x},
+            'delta_t': {'name': 'Time Delay', 'unit': 's', 'transform': lambda x: x}
+        }
+        
+        # Actual parameter values
+        actual_values = {
+            'r': actual_params['source_distance'],
+            'm_c': actual_params['chirp_mass'],
+            'tc': actual_params['merger_time'],
+            'phi_c': actual_params['phase'] * np.pi,
+            'A': actual_params['flux_ratio'],
+            'delta_t': actual_params['time_delay']
+        }
+        
+        # Create comparison data
+        table_data = []
+        
+        for param in param_info.keys():
+            # Get estimated values
+            pso_raw = float(pso_results['best_params'][param])
+            mcmc_raw = float(mcmc_results['best_params'][param])
+            
+            # Transform to physical units
+            pso_value = param_info[param]['transform'](pso_raw)
+            mcmc_value = param_info[param]['transform'](mcmc_raw)
+            actual_value = actual_values[param]
+            
+            # Calculate errors
+            pso_error = abs((pso_value - actual_value) / actual_value) * 100
+            mcmc_error = abs((mcmc_value - actual_value) / actual_value) * 100
+            
+            # Add to table
+            table_data.append({
+                'Parameter': param_info[param]['name'],
+                'Unit': param_info[param]['unit'],
+                'True Value': f"{actual_value:.4f}",
+                'PSO Estimate': f"{pso_value:.4f}",
+                'PSO Error (%)': f"{pso_error:.2f}",
+                'MCMC Estimate': f"{mcmc_value:.4f}",
+                'MCMC Error (%)': f"{mcmc_error:.2f}"
+            })
+        
+        # Create DataFrame
+        param_df = pd.DataFrame(table_data)
+        
+        # Save to CSV
+        param_df.to_csv(f"{results_dir}/parameter_comparison_table.csv", index=False)
+        
+        # Create formatted table plot
+        fig, ax = plt.subplots(figsize=(14, 8), dpi=200)
+        ax.axis('tight')
+        ax.axis('off')
+        
+        # Create table
+        table = ax.table(cellText=param_df.values,
+                        colLabels=param_df.columns,
+                        cellLoc='center',
+                        loc='center',
+                        bbox=[0, 0, 1, 1])
+        
+        # Style the table
+        table.auto_set_font_size(False)
+        table.set_fontsize(10)
+        table.scale(1.2, 2)
+        
+        # Color header
+        for i in range(len(param_df.columns)):
+            table[(0, i)].set_facecolor('#4CAF50')
+            table[(0, i)].set_text_props(weight='bold', color='white')
+        
+        # Color cells based on error values
+        for i in range(1, len(param_df) + 1):
+            # PSO error column
+            pso_error_val = float(param_df.iloc[i-1]['PSO Error (%)'])
+            if pso_error_val < 5:
+                table[(i, 4)].set_facecolor('#E8F5E8')
+            elif pso_error_val < 10:
+                table[(i, 4)].set_facecolor('#FFF3CD')
+            else:
+                table[(i, 4)].set_facecolor('#F8D7DA')
+            
+            # MCMC error column
+            mcmc_error_val = float(param_df.iloc[i-1]['MCMC Error (%)'])
+            if mcmc_error_val < 5:
+                table[(i, 6)].set_facecolor('#E8F5E8')
+            elif mcmc_error_val < 10:
+                table[(i, 6)].set_facecolor('#FFF3CD')
+            else:
+                table[(i, 6)].set_facecolor('#F8D7DA')
+        
+        plt.title('Parameter Estimation Comparison: PSO vs MCMC', 
+                 fontsize=16, fontweight='bold', pad=20)
+        plt.savefig(f"{results_dir}/parameter_comparison_table.png", 
+                   bbox_inches='tight', dpi=200)
+        plt.close()
+        
+        print(f"Parameter comparison table saved to {results_dir}/parameter_comparison_table.csv")
+        print(f"Parameter comparison table plot saved to {results_dir}/parameter_comparison_table.png")
+        
+        return param_df
+        
+    except Exception as e:
+        print(f"Error creating parameter comparison table: {str(e)}")
+        return pd.DataFrame()
+
+
+def create_signal_ratio_plot(pso_results, mcmc_results, data_dict):
+    """Create signal ratio plot comparing PSO and MCMC reconstructed signals to injected signal"""
+    print("\nCreating signal ratio plot...")
+    
+    try:
+        # Extract data
+        t_np = np.array(data_dict['t'])
+        injected = np.array(data_dict['dataY_only_signal'])
+        pso_signal = np.array(pso_results['best_signal'])
+        mcmc_signal = np.array(mcmc_results['best_signal'])
+        
+        # Handle zero division for 10^-21 scale signals
+        epsilon = 1e-25
+        
+        # Calculate ratios, handling zeros
+        pso_ratio = np.divide(pso_signal, injected, 
+                             out=np.ones_like(pso_signal), 
+                             where=np.abs(injected) > epsilon)
+        
+        mcmc_ratio = np.divide(mcmc_signal, injected, 
+                              out=np.ones_like(mcmc_signal), 
+                              where=np.abs(injected) > epsilon)
+        
+        # Clip extreme values for better visualization
+        pso_ratio = np.clip(pso_ratio, -5, 5)
+        mcmc_ratio = np.clip(mcmc_ratio, -5, 5)
+        
+        # Create plot
+        plt.figure(figsize=(12, 6), dpi=150)
+        
+        plt.plot(t_np, pso_ratio, 'r-', linewidth=1.2, alpha=0.8, label='PSO/Injected')
+        plt.plot(t_np, mcmc_ratio, 'b-', linewidth=1.2, alpha=0.8, label='MCMC/Injected')
+        plt.axhline(y=1, color='black', linestyle='--', alpha=0.7, linewidth=1.5, 
+                   label='Perfect Reconstruction')
+        
+        plt.xlabel('Time (s)', fontsize=12)
+        plt.ylabel('Ratio', fontsize=12)
+        plt.title('Signal Reconstruction Ratio Comparison', fontsize=14)
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+        plt.ylim(-5.5, 5.5)
+        
+        plt.tight_layout()
+        plt.savefig(f"{results_dir}/signal_ratio_comparison.png", 
+                   bbox_inches='tight', dpi=150)
+        plt.close()
+        
+        print(f"Signal ratio plot saved to {results_dir}/signal_ratio_comparison.png")
+        
+        return {'status': 'success'}
+        
+    except Exception as e:
+        print(f"Error creating signal ratio plot: {e}")
+        return {'status': 'error'}
+
+
 def generate_comparison_plots(pso_results, mcmc_results, data_dict, comparison, actual_params, param_ranges=None):
     """Generate plots comparing PSO and MCMC results"""
     print("\nGenerating comparison plots...")
@@ -734,10 +907,10 @@ def generate_comparison_plots(pso_results, mcmc_results, data_dict, comparison, 
                  label=f'PSO Estimate (SNR: {comparison["signal_quality"]["PSO"]["SNR"]:.2f})')
         plt.plot(t_np, mcmc_results['best_signal'], 'b', lw=1.5,
                  label=f'Bilby MCMC Estimate (SNR: {comparison["signal_quality"]["MCMC"]["SNR"]:.2f})')
-        plt.title('Signal Reconstruction Comparison')
-        plt.xlabel('Time (s)')
-        plt.ylabel('Strain')
-        plt.legend()
+        plt.title('Signal Reconstruction Comparison', fontsize=14, fontweight='bold')
+        plt.xlabel('Time (s)', fontsize=12)
+        plt.ylabel('Strain', fontsize=12)
+        plt.legend(fontsize=10)
         plt.grid(True, alpha=0.3)
         plt.savefig(f"{results_dir}/signal_comparison.png", bbox_inches='tight')
         plt.close()
@@ -750,10 +923,10 @@ def generate_comparison_plots(pso_results, mcmc_results, data_dict, comparison, 
                  label=f'PSO Residual (Match: {comparison["signal_quality"]["PSO"]["match_final"]:.4f})')
         plt.plot(t_np, mcmc_residual, 'b', alpha=0.7,
                  label=f'Bilby MCMC Residual (Match: {comparison["signal_quality"]["MCMC"]["match_final"]:.4f})')
-        plt.title('Residual Comparison (Estimate - Actual Signal)')
-        plt.xlabel('Time (s)')
-        plt.ylabel('Strain Difference')
-        plt.legend()
+        plt.title('Residual Comparison (Estimate - Actual Signal)', fontsize=14, fontweight='bold')
+        plt.xlabel('Time (s)', fontsize=12)
+        plt.ylabel('Strain Difference', fontsize=12)
+        plt.legend(fontsize=10)
         plt.grid(True, alpha=0.3)
         plt.savefig(f"{results_dir}/residual_comparison.png", bbox_inches='tight')
         plt.close()
@@ -772,11 +945,11 @@ def generate_comparison_plots(pso_results, mcmc_results, data_dict, comparison, 
         plt.bar(x - width / 2, pso_error_vals, width, label='PSO', color='red', alpha=0.7)
         plt.bar(x + width / 2, mcmc_error_vals, width, label='Bilby MCMC', color='blue', alpha=0.7)
 
-        plt.xlabel('Parameters')
-        plt.ylabel('Relative Error (%)')
-        plt.title('Parameter Estimation Error Comparison')
+        plt.xlabel('Parameters', fontsize=12)
+        plt.ylabel('Relative Error (%)', fontsize=12)
+        plt.title('Parameter Estimation Error Comparison', fontsize=14, fontweight='bold')
         plt.xticks(x, param_labels, rotation=45)
-        plt.legend()
+        plt.legend(fontsize=10)
         plt.grid(True, alpha=0.3)
         plt.tight_layout()
         plt.savefig(f"{results_dir}/parameter_errors.png", bbox_inches='tight')
@@ -787,11 +960,12 @@ def generate_comparison_plots(pso_results, mcmc_results, data_dict, comparison, 
         plt.bar(['PSO', 'Bilby MCMC'],
                 [comparison['execution_time']['PSO'], comparison['execution_time']['MCMC']],
                 color=['red', 'blue'], alpha=0.7)
-        plt.ylabel('Execution Time (seconds)')
-        plt.title(f'Execution Time Comparison\nBilby MCMC is {comparison["execution_time"]["ratio"]:.2f}x slower')
+        plt.ylabel('Execution Time (seconds)', fontsize=12)
+        plt.title(f'Execution Time Comparison\nBilby MCMC is {comparison["execution_time"]["ratio"]:.2f}x slower', 
+                 fontsize=14, fontweight='bold')
         plt.grid(True, alpha=0.3)
         for i, v in enumerate([comparison['execution_time']['PSO'], comparison['execution_time']['MCMC']]):
-            plt.text(i, v + 1, f"{v:.2f}s", ha='center')
+            plt.text(i, v + 1, f"{v:.2f}s", ha='center', fontsize=10)
         plt.savefig(f"{results_dir}/execution_time.png", bbox_inches='tight')
         plt.close()
 
@@ -826,6 +1000,12 @@ def main():
         # Evaluate and compare results
         comparison = evaluate_results(pso_results, mcmc_results, actual_params, data_dict)
 
+        # Create parameter comparison table
+        param_table = create_parameter_comparison_table(pso_results, mcmc_results, actual_params, param_ranges)
+
+        # Create signal ratio plot
+        ratio_stats = create_signal_ratio_plot(pso_results, mcmc_results, data_dict)
+
         # Generate comparison plots
         generate_comparison_plots(pso_results, mcmc_results, data_dict, comparison, actual_params, param_ranges)
 
@@ -856,7 +1036,7 @@ def main():
 
         summary_df.to_csv(f"{results_dir}/summary.csv", index=False)
 
-        print("\nComparison complete! Results saved in the comparison_results directory.")
+        print("\nComparison complete! Results saved in the cpu_results_fixed directory.")
         print(f"PSO is {comparison['execution_time']['ratio']:.2f}x faster than Bilby MCMC")
 
         # Generate final message based on overall comparison
