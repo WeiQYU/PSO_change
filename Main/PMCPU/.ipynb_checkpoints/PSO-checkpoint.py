@@ -1,18 +1,16 @@
 import numpy as np
-from scipy.fftpack import fft
 from pycbc.types import FrequencySeries, TimeSeries
 from tqdm import tqdm
-import pycbc.types
 from pycbc.filter import match, matched_filter
 import scipy.constants as const
 import time
-import math
+from scipy.optimize import minimize_scalar
 
 # Constants
-G = const.G  # Gravitational constant, m^3 kg^-1 s^-2
-c = const.c  # Speed of light, m/s
-M_sun = 1.989e30  # Solar mass, kg
-pc = 3.086e16  # Parsec to meters
+G = const.G
+c = const.c
+M_sun = 1.989e30
+pc = 3.086e16
 
 __all__ = [
     'crcbqcpsopsd',
@@ -26,36 +24,16 @@ __all__ = [
     'innerprodpsd',
     's2rv',
     'crcbchkstdsrchrng',
-    'calculate_snr_pycbc',
-    'analyze_mismatch',
     'pycbc_calculate_match',
     'two_step_matching',
-    'calculate_matched_filter_snr'
+    'calculate_matched_filter_snr',
+    'refine_distance_parameter',
+    'direct_amplitude_distance_refinement'
 ]
 
 
 def generate_unlensed_gw(dataX, r, m_c, tc, phi_c):
-    """
-    Generate unlensed gravitational wave signal
-
-    Parameters:
-    -----------
-    dataX : array
-        Time series
-    r : float
-        Distance (log10 of distance in Mpc)
-    m_c : float
-        Log10 of chirp mass in solar masses
-    tc : float
-        Merger time
-    phi_c : float
-        Coalescence phase
-
-    Returns:
-    --------
-    h : array
-        Gravitational wave signal
-    """
+    """Generate unlensed gravitational wave signal"""
     # Convert parameter units
     r = (10 ** r) * 1e6 * pc  # Distance (meters)
     m_c = (10 ** m_c) * M_sun  # Combined mass (kg)
@@ -66,8 +44,7 @@ def generate_unlensed_gw(dataX, r, m_c, tc, phi_c):
     else:
         dataX_cpu = dataX
 
-    # Generate gravitational wave signal
-    t = dataX_cpu  # Time series
+    t = dataX_cpu
 
     # Calculate signal in valid region before merger
     valid_idx = t < tc
@@ -76,7 +53,7 @@ def generate_unlensed_gw(dataX, r, m_c, tc, phi_c):
     # Initialize waveform
     h = np.zeros_like(t)
 
-    if np.sum(valid_idx) > 0:  # Ensure there's a valid region
+    if np.sum(valid_idx) > 0:
         # Calculate frequency evolution parameter Theta
         Theta = c ** 3 * (tc - t_valid) / (5 * G * m_c)
 
@@ -93,38 +70,16 @@ def generate_unlensed_gw(dataX, r, m_c, tc, phi_c):
 
 
 def apply_lensing_effect(h, t, A, delta_t, tc):
-    """
-    Apply lensing effect to a gravitational wave signal
-
-    Parameters:
-    -----------
-    h : array
-        Unlensed gravitational wave signal
-    t : array
-        Time series
-    A : float
-        Magnification factor
-    delta_t : float
-        Time delay
-    tc : float
-        Merger time
-
-    Returns:
-    --------
-    h_lens : array
-        Lensed gravitational wave signal
-    """
+    """Apply lensing effect to a gravitational wave signal"""
     # Calculate FFT of signal
     n = len(h)
     h_fft = np.fft.fft(h)
 
     # Calculate frequency array
-    dt = t[1] - t[0]  # Sampling interval
-    fs = 1 / dt  # Sampling frequency
+    dt = t[1] - t[0]
     freqs = np.fft.fftfreq(n, dt)
 
     # Calculate lens transfer function F(f) = 1 + A * exp(i * Phi)
-    # where Phi = 2πf * delta_t
     Phi = 2 * np.pi * freqs * delta_t
     lens_transfer = 1 + A * np.exp(1j * Phi)
 
@@ -141,69 +96,249 @@ def apply_lensing_effect(h, t, A, delta_t, tc):
 
 
 def crcbgenqcsig(dataX, r, m_c, tc, phi_c, A, delta_t, use_lensing=True):
-    """
-    Generate gravitational wave signal with optional lensing effect
-
-    Parameters:
-    -----------
-    dataX : array
-        Time series
-    r : float
-        Distance (log10 of distance in Mpc)
-    m_c : float
-        Log10 of chirp mass in solar masses
-    tc : float
-        Merger time
-    phi_c : float
-        Coalescence phase
-    A : float
-        Magnification factor
-    delta_t : float
-        Time delay
-    use_lensing : bool
-        Whether to apply lensing effect
-
-    Returns:
-    --------
-    h : array
-        Gravitational wave signal
-    """
+    """Generate gravitational wave signal with optional lensing effect"""
     # Generate unlensed waveform
     h = generate_unlensed_gw(dataX, r, m_c, tc, phi_c)
 
     # Apply lensing effect if needed
     if use_lensing:
-        # Ensure input is NumPy array
         if not isinstance(dataX, np.ndarray):
             t = np.asarray(dataX)
         else:
             t = dataX
-
         h = apply_lensing_effect(h, t, A, delta_t, tc)
 
     return h
 
 
+def normsig4psd(sigVec, sampFreq, psdVec, snr):
+    """Normalize signal according to PSD"""
+    nSamples = len(sigVec)
+
+    # Handle PSD vector adjustment
+    if psdVec.shape[0] > 1:
+        psd_len = len(psdVec)
+        if psd_len < nSamples // 2 + 1:
+            extended_psd = np.zeros(nSamples // 2 + 1)
+            extended_psd[:psd_len] = psdVec
+            extended_psd[psd_len:] = psdVec[-1]
+            psdVec = extended_psd
+
+        # Create complete PSD vector for positive and negative frequencies
+        psdVec4Norm = np.zeros(nSamples)
+        psdVec4Norm[:nSamples // 2 + 1] = psdVec[:nSamples // 2 + 1]
+        psdVec4Norm[nSamples // 2 + 1:] = psdVec[1:nSamples // 2][::-1]
+    else:
+        psdVec4Norm = np.ones(nSamples) * psdVec[0]
+
+    # Ensure PSD has no zero values
+    min_psd = np.max(psdVec4Norm) * 1e-14
+    psdVec4Norm = np.maximum(psdVec4Norm, min_psd)
+
+    # Calculate normalization factor
+    fft_sig = np.fft.fft(sigVec)
+    normSigSqrd = np.sum((np.abs(fft_sig) ** 2) / psdVec4Norm) / (sampFreq * nSamples)
+
+    if np.abs(normSigSqrd) < 1e-10:
+        normFac = 0
+    else:
+        normFac = snr / np.sqrt(np.abs(normSigSqrd))
+
+    return normFac * sigVec, normFac
+
+
+def direct_amplitude_distance_refinement(pso_params, dataX, observed_signal, sampFreq, psdHigh):
+    """
+    直接基于振幅比计算距离参数的改进方法
+    """
+    print("开始直接基于振幅比的距离参数精炼")
+    
+    # 原始参数
+    original_r = pso_params['r']
+    original_distance_mpc = 10 ** original_r
+    
+    print(f"原始距离估计: {original_distance_mpc:.4f} Mpc")
+    
+    m_c = pso_params['m_c']
+    tc = pso_params['tc']
+    phi_c = pso_params['phi_c']
+    A = pso_params['A']
+    delta_t = pso_params['delta_t']
+    use_lensing = A >= 0.01
+    
+    try:
+        # 生成当前参数的模板信号
+        template_signal = crcbgenqcsig(
+            dataX, original_r, m_c, tc, phi_c, A, delta_t,
+            use_lensing=use_lensing
+        )
+        
+        if np.all(template_signal == 0) or np.isnan(template_signal).any():
+            print("模板信号生成失败")
+            return pso_params, {'status': 'template_generation_failed'}
+        
+        # 归一化处理
+        template_normalized, norm_factor = normsig4psd(template_signal, sampFreq, psdHigh, 1.0)
+        
+        if norm_factor == 0 or np.all(template_normalized == 0):
+            print("模板信号归一化失败")
+            return pso_params, {'status': 'normalization_failed'}
+        
+        # 计算真实振幅比
+        observed_rms = np.sqrt(np.mean(observed_signal ** 2))
+        template_rms = np.sqrt(np.mean(template_signal ** 2))
+        
+        if template_rms < 1e-30 or observed_rms < 1e-30:
+            print("信号振幅过小")
+            return pso_params, {'status': 'amplitude_too_small'}
+        
+        amplitude_ratio = observed_rms / template_rms
+        print(f"振幅比: {amplitude_ratio:.6f}")
+        
+        # 计算新的距离参数
+        new_distance_mpc = original_distance_mpc / amplitude_ratio
+        new_r = np.log10(new_distance_mpc)
+        
+        print(f"新距离估计: {new_distance_mpc:.1f} Mpc")
+        
+        # 验证新距离参数
+        new_template_signal = crcbgenqcsig(
+            dataX, new_r, m_c, tc, phi_c, A, delta_t,
+            use_lensing=use_lensing
+        )
+        
+        new_template_rms = np.sqrt(np.mean(new_template_signal ** 2))
+        
+        # 计算改进
+        original_amplitude_error = abs(template_rms - observed_rms) / observed_rms
+        new_amplitude_error = abs(new_template_rms - observed_rms) / observed_rms
+        
+        print(f"原始振幅误差: {original_amplitude_error * 100:.2f}%")
+        print(f"新振幅误差: {new_amplitude_error * 100:.2f}%")
+        
+        # 计算匹配度
+        original_normalized, _ = normsig4psd(template_signal, sampFreq, psdHigh, 1.0)
+        new_normalized, _ = normsig4psd(new_template_signal, sampFreq, psdHigh, 1.0)
+        
+        orig_amp = innerprodpsd(observed_signal, original_normalized, sampFreq, psdHigh)
+        new_amp = innerprodpsd(observed_signal, new_normalized, sampFreq, psdHigh)
+        
+        print(f"original Amp: {orig_amp:.4f}")
+        print(f"New Amp: {new_amp:.4f}")
+        
+        # 判断是否接受新的距离参数
+        amplitude_improvement_threshold = 0.1
+        match_improvement_threshold = 0.01
+        
+        if new_distance_mpc < 10 or new_distance_mpc > 50000:
+            print(f"新距离超出合理范围")
+            status = 'unreasonable_distance'
+            use_refined = False
+        elif new_amplitude_error < original_amplitude_error * (1 - amplitude_improvement_threshold):
+            status = 'success'
+            use_refined = True
+            print("距离精炼成功（振幅匹配改善）")
+        else:
+            status = 'no_improvement'
+            use_refined = False
+            print("距离精炼未带来显著改进")
+        
+        # 准备返回结果
+        if use_refined:
+            refined_params = pso_params.copy()
+            refined_params['r'] = new_r
+            final_distance = new_distance_mpc
+            final_r = new_r
+        else:
+            refined_params = pso_params.copy()
+            final_distance = original_distance_mpc
+            final_r = original_r
+        
+        refinement_info = {
+            'status': status,
+            'method': 'direct_amplitude_ratio',
+            'original_distance_mpc': original_distance_mpc,
+            'original_distance_log10': original_r,
+            'estimated_distance_mpc': new_distance_mpc,
+            'estimated_distance_log10': new_r,
+            'final_distance_mpc': final_distance,
+            'final_distance_log10': final_r,
+            'amplitude_ratio': amplitude_ratio,
+            'observed_rms': observed_rms,
+            'original_template_rms': template_rms,
+            'new_template_rms': new_template_rms if 'new_template_rms' in locals() else 0,
+            'improvement_used': use_refined,
+            'original_amplitude_error': original_amplitude_error if 'original_amplitude_error' in locals() else 0,
+            'new_amplitude_error': new_amplitude_error if 'new_amplitude_error' in locals() else 0
+        }
+        
+        print(f"最终使用距离: {final_distance:.1f} Mpc")
+        
+        return refined_params, refinement_info
+        
+    except Exception as e:
+        print(f"距离精炼过程出错: {str(e)}")
+        return pso_params, {
+            'status': 'error',
+            'method': 'direct_amplitude_ratio',
+            'error': str(e),
+            'original_distance_mpc': original_distance_mpc,
+            'original_distance_log10': original_r,
+            'final_distance_mpc': original_distance_mpc,
+            'final_distance_log10': original_r,
+            'improvement_used': False,
+            'confidence': 0.0
+        }
+
+
+def refine_distance_parameter(initial_params, dataX, dataY_only_signal, sampFreq, psdHigh, param_ranges):
+    """Enhanced distance parameter refinement using direct amplitude ratio method"""
+    print("Starting distance parameter refinement...")
+
+    pso_params = {
+        'r': initial_params['r'],
+        'm_c': initial_params['m_c'],
+        'tc': initial_params['tc'],
+        'phi_c': initial_params['phi_c'],
+        'A': initial_params['A'],
+        'delta_t': initial_params['delta_t']
+    }
+
+    try:
+        refined_params, refinement_info = direct_amplitude_distance_refinement(
+            pso_params, dataX, dataY_only_signal, sampFreq, psdHigh
+        )
+
+        refined_distance = refined_params['r']
+
+        refinement_info.update({
+            'initial_distance_mpc': refinement_info['original_distance_mpc'],
+            'refined_distance_mpc': refinement_info['final_distance_mpc'],
+            'improvement_factor': abs(refined_distance - initial_params['r']),
+            'optimization_success': refinement_info['status'] == 'success'
+        })
+
+        print(f"Distance refinement completed:")
+        print(f"  Original distance: {refinement_info['original_distance_mpc']:.1f} Mpc")
+        print(f"  Refined distance: {refinement_info['final_distance_mpc']:.1f} Mpc")
+
+        return refined_distance, refinement_info
+
+    except Exception as e:
+        print(f"Error in distance refinement: {e}")
+        return initial_params['r'], {
+            'status': 'error',
+            'method': 'direct_amplitude_ratio',
+            'error': str(e),
+            'initial_distance_mpc': 10 ** initial_params['r'],
+            'refined_distance_mpc': 10 ** initial_params['r'],
+            'improvement_factor': 0.0,
+            'optimization_success': False
+        }
+
+
 def pycbc_calculate_match(signal1, signal2, fs, psd):
-    """
-    Calculate match between two signals using PyCBC
-
-    Parameters:
-    -----------
-    signal1 : array
-        First signal
-    signal2 : array
-        Second signal
-    fs : float
-        Sampling frequency
-    psd : array
-        Power spectral density
-
-    Returns:
-    --------
-    match_value : float
-        Match value between signals
-    """
+    """Calculate match between two signals using PyCBC"""
     # Ensure data is NumPy arrays
     if not isinstance(signal1, np.ndarray):
         signal1 = np.asarray(signal1)
@@ -217,6 +352,22 @@ def pycbc_calculate_match(signal1, signal2, fs, psd):
     ts_signal1 = TimeSeries(signal1, delta_t=delta_t)
     ts_signal2 = TimeSeries(signal2, delta_t=delta_t)
 
+    # Handle PSD length adjustment
+    nSamples = len(signal1)
+    expected_psd_len = nSamples // 2 + 1
+
+    if len(psd) < expected_psd_len:
+        extended_psd = np.zeros(expected_psd_len)
+        extended_psd[:len(psd)] = psd
+        extended_psd[len(psd):] = psd[-1]
+        psd = extended_psd
+    elif len(psd) > expected_psd_len:
+        psd = psd[:expected_psd_len]
+
+    # Ensure PSD has no zero values
+    min_psd = np.max(psd) * 1e-14
+    psd = np.maximum(psd, min_psd)
+
     # Create PyCBC FrequencySeries object for PSD
     delta_f = 1.0 / (len(signal1) * delta_t)
     psd_series = FrequencySeries(psd, delta_f=delta_f)
@@ -227,31 +378,10 @@ def pycbc_calculate_match(signal1, signal2, fs, psd):
     return float(match_value)
 
 
-def two_step_matching(params, dataY, psdHigh, sampFreq, actual_params=None):
-    """
-    Enhanced two-step matching process to classify gravitational wave signals
-    based on the value of A. A < 0.01 indicates unlensed signal, A >= 0.01 indicates
-    lensed signal.
-
-    Parameters:
-    -----------
-    params : dict
-        Signal parameters
-    dataY : array
-        Observed data
-    psdHigh : array
-        Power spectral density
-    sampFreq : float
-        Sampling frequency
-    actual_params : dict, optional
-        Actual parameters for validation and error calculation only
-
-    Returns:
-    --------
-    result : dict
-        Classification result and details with enhanced metrics
-    """
+def two_step_matching(params, dataY, psdHigh, sampFreq, actual_params=None, enable_distance_refinement=True):
+    """Enhanced two-step matching process with distance parameter refinement"""
     print("=========== 判断结果 ===========")
+    
     # Extract parameters
     r = params.get('r')
     m_c = params.get('m_c')
@@ -260,9 +390,9 @@ def two_step_matching(params, dataY, psdHigh, sampFreq, actual_params=None):
     A = params.get('A')
     delta_t = params.get('delta_t')
     dataX = params.get('dataX')
-    dataY_only_signal = params.get('dataY_only_signal')  # 纯信号数据用于匹配
+    dataY_only_signal = params.get('dataY_only_signal')
 
-    # Initialize enhanced result
+    # Initialize result
     result = {
         'unlensed_signal': None,
         'unlensed_snr': None,
@@ -272,48 +402,42 @@ def two_step_matching(params, dataY, psdHigh, sampFreq, actual_params=None):
         'lensed_match': None,
         'is_lensed': False,
         'message': "",
-        'classification': "noise",  # Default classification
-        'parameter_errors': {},  # Store errors compared to actual values (only for evaluation)
-        'model_comparison': {},  # Store model comparison metrics
-        'actual_comparison': {}  # Store comparison with actual values (only for evaluation)
+        'classification': "noise",
+        'parameter_errors': {},
+        'model_comparison': {},
+        'actual_comparison': {},
+        'distance_refinement': {'enabled': enable_distance_refinement}
     }
 
-    # Step 1: Generate unlensed signal and calculate match
+    # Generate unlensed signal
     unlensed_signal = crcbgenqcsig(dataX, r, m_c, tc, phi_c, A, delta_t, use_lensing=False)
-
-    # Normalize signal
     unlensed_signal, normFac = normsig4psd(unlensed_signal, sampFreq, psdHigh, 1)
     estAmp = innerprodpsd(dataY_only_signal, unlensed_signal, sampFreq, psdHigh)
     unlensed_signal = estAmp * unlensed_signal
 
-    # Calculate SNR and match for unlensed model
+    # Calculate SNR for unlensed model
     unlensed_snr = calculate_matched_filter_snr(unlensed_signal, dataY_only_signal, psdHigh, sampFreq)
     print(f'unlensed_snr: {unlensed_snr}')
 
-    # Update result with unlensed_signal info
     result.update({
         'unlensed_signal': unlensed_signal,
         'unlensed_snr': unlensed_snr
     })
 
-    # Check if SNR < 8 (noise) - highest priority
-    print("检测是不是噪声")
+    # Check if SNR < 8 (noise)
     if unlensed_snr < 8:
-        print("ok,是噪声")
+        print("是噪声")
         result['message'] = "This is noise"
         result['classification'] = "noise"
         return result
-    print("不是噪声")
 
-    # Calculate match using pycbc.filter.match
+    # Calculate match for unlensed signal
     unlensed_match = pycbc_calculate_match(unlensed_signal, dataY_only_signal, sampFreq, psdHigh)
     result['unlensed_match'] = unlensed_match
     print(f"Unlensed match: {unlensed_match}")
 
-    # Generate lensed signal for comparison
+    # Generate lensed signal
     lensed_signal = crcbgenqcsig(dataX, r, m_c, tc, phi_c, A, delta_t, use_lensing=True)
-
-    # Normalize signal
     lensed_signal, _ = normsig4psd(lensed_signal, sampFreq, psdHigh, 1)
     estAmp = innerprodpsd(dataY_only_signal, lensed_signal, sampFreq, psdHigh)
     lensed_signal = estAmp * lensed_signal
@@ -335,14 +459,13 @@ def two_step_matching(params, dataY, psdHigh, sampFreq, actual_params=None):
     # Model comparison metrics
     model_comparison = {
         'snr_difference': lensed_snr - unlensed_snr,
-        'match_difference': lensed_match - unlensed_match,  # Changed from mismatch difference
+        'match_difference': lensed_match - unlensed_match,
         'snr_ratio': lensed_snr / unlensed_snr if unlensed_snr > 0 else float('inf'),
         'match_ratio': lensed_match / unlensed_match if unlensed_match > 0 else float('inf')
     }
     result['model_comparison'] = model_comparison
 
-    # Classification based solely on the value of A
-    # A < 0.01 indicates unlensed signal, A >= 0.01 indicates lensed signal
+    # Classification based on A parameter
     if A < 0.01:
         result['is_lensed'] = False
         result['message'] = f"This is an unlensed signal (A = {A:.6f} < 0.01)"
@@ -352,59 +475,63 @@ def two_step_matching(params, dataY, psdHigh, sampFreq, actual_params=None):
         result['message'] = f"This is a lens signal (A = {A:.6f} >= 0.01)"
         result['classification'] = "lens_signal"
 
-    # Compare with actual parameters if provided (for evaluation only)
-    if actual_params is not None:
-        # Convert parameters to the same units for comparison
-        actual_r_log10 = np.log10(actual_params.get('source_distance', 0)) if actual_params.get('source_distance',
-                                                                                                0) > 0 else 0
-        actual_m_c_log10 = np.log10(actual_params.get('chirp_mass', 0)) if actual_params.get('chirp_mass', 0) > 0 else 0
-
-        # Calculate relative errors
-        param_errors = {
-            'r_error': (10 ** r - 10 ** actual_r_log10) / 10 ** actual_r_log10 if actual_r_log10 > 0 else float('inf'),
-            'm_c_error': (
-                                 10 ** m_c - 10 ** actual_m_c_log10) / 10 ** actual_m_c_log10 if actual_m_c_log10 > 0 else float(
-                'inf'),
-            'tc_error': (tc - actual_params.get('merger_time', 0)) / actual_params.get('merger_time', 1),
-            'phi_c_error': min(abs(phi_c - actual_params.get('phase', 0) * 2 * np.pi),
-                               abs(phi_c - actual_params.get('phase', 0) * 2 * np.pi - 2 * np.pi)) / (2 * np.pi),
-            'A_error': (A - actual_params.get('flux_ratio', 0)) / actual_params.get('flux_ratio', 1),
-            'delta_t_error': (delta_t - actual_params.get('time_delay', 0)) / actual_params.get('time_delay', 1),
-            'classification_correct': (result['is_lensed'] == (actual_params.get('flux_ratio', 0) >= 0.01))
+    # Apply distance parameter refinement if enabled
+    if enable_distance_refinement:
+        param_ranges = {
+            'rmin': np.array([-2, 0, 0.1, 0, 0, 0.1]),
+            'rmax': np.array([4, 2, 8.0, np.pi, 1.0, 4.0])
         }
-        result['parameter_errors'] = param_errors
 
-        # Create detailed actual value comparison
-        actual_comparison = {
-            'actual_is_lensed': actual_params.get('flux_ratio', 0) >= 0.01,
-            'estimated_is_lensed': result['is_lensed'],
-            'classification_matches_actual': param_errors['classification_correct'],
-            'parameters': {
-                'r': {'estimated': r, 'actual_log10': actual_r_log10,
-                      'actual': 10 ** actual_r_log10 if actual_r_log10 > 0 else 0},
-                'm_c': {'estimated': m_c, 'actual_log10': actual_m_c_log10,
-                        'actual': 10 ** actual_m_c_log10 if actual_m_c_log10 > 0 else 0},
-                'tc': {'estimated': tc, 'actual': actual_params.get('merger_time', 0)},
-                'phi_c': {'estimated': phi_c, 'actual_radians': actual_params.get('phase', 0) * 2 * np.pi},
-                'A': {'estimated': A, 'actual': actual_params.get('flux_ratio', 0)},
-                'delta_t': {'estimated': delta_t, 'actual': actual_params.get('time_delay', 0)}
-            }
+        initial_params_dict = {
+            'r': r, 'm_c': m_c, 'tc': tc, 'phi_c': phi_c, 'A': A, 'delta_t': delta_t
         }
-        result['actual_comparison'] = actual_comparison
 
-        # Enhance message with actual comparison
-        if result['is_lensed'] != (actual_params.get('flux_ratio', 0) >= 0.01):
-            actual_type = "unlensed" if actual_params.get('flux_ratio', 0) < 0.01 else "lensed"
-            result['message'] += f" - MISCLASSIFIED (actual signal is {actual_type})"
-        else:
-            result['message'] += f" - CORRECT CLASSIFICATION"
+        try:
+            refined_r, refinement_info = refine_distance_parameter(
+                initial_params_dict, dataX, dataY_only_signal, sampFreq, psdHigh, param_ranges
+            )
+
+            result['distance_refinement'].update({
+                'original_distance': r,
+                'refined_distance': refined_r,
+                'refinement_info': refinement_info
+            })
+
+            # Update parameter if refinement was successful
+            if refinement_info['status'] == 'success':
+                print("Distance refinement successful, updating parameters")
+                r = refined_r
+
+                # Regenerate signals with refined distance
+                if result['is_lensed']:
+                    final_signal = crcbgenqcsig(dataX, r, m_c, tc, phi_c, A, delta_t, use_lensing=True)
+                else:
+                    final_signal = crcbgenqcsig(dataX, r, m_c, tc, phi_c, A, delta_t, use_lensing=False)
+
+                final_signal, _ = normsig4psd(final_signal, sampFreq, psdHigh, 1)
+                estAmp = innerprodpsd(dataY_only_signal, final_signal, sampFreq, psdHigh)
+                final_signal = estAmp * final_signal
+
+                # Update result with refined signal
+                if result['is_lensed']:
+                    result['lensed_signal'] = final_signal
+                    result['lensed_snr'] = calculate_matched_filter_snr(final_signal, dataY_only_signal, psdHigh, sampFreq)
+                    result['lensed_match'] = pycbc_calculate_match(final_signal, dataY_only_signal, sampFreq, psdHigh)
+                else:
+                    result['unlensed_signal'] = final_signal
+                    result['unlensed_snr'] = calculate_matched_filter_snr(final_signal, dataY_only_signal, psdHigh, sampFreq)
+                    result['unlensed_match'] = pycbc_calculate_match(final_signal, dataY_only_signal, sampFreq, psdHigh)
+
+        except Exception as e:
+            print(f"Distance refinement failed: {e}")
+            result['distance_refinement']['refinement_info'] = {'status': 'error', 'error': str(e)}
 
     return result
 
 
 def calculate_matched_filter_snr(signal, template, psd, fs):
-    """计算匹配滤波SNR，使用template作为模板"""
-    # 确保数据是NumPy数组
+    """计算匹配滤波SNR"""
+    # Ensure data is NumPy arrays
     if not isinstance(signal, np.ndarray):
         signal_np = np.asarray(signal)
     else:
@@ -420,71 +547,64 @@ def calculate_matched_filter_snr(signal, template, psd, fs):
     else:
         psd_np = psd
 
-    # 创建PyCBC TimeSeries对象
+    # Create PyCBC TimeSeries objects
     delta_t = 1.0 / fs
     ts_signal = TimeSeries(signal_np, delta_t=delta_t)
     ts_template = TimeSeries(template_np, delta_t=delta_t)
 
-    # 创建PSD对象
+    # Handle PSD length adjustment
+    nSamples = len(signal_np)
+    expected_psd_len = nSamples // 2 + 1
+
+    if len(psd_np) < expected_psd_len:
+        extended_psd = np.zeros(expected_psd_len)
+        extended_psd[:len(psd_np)] = psd_np
+        extended_psd[len(psd_np):] = psd_np[-1]
+        psd_np = extended_psd
+    elif len(psd_np) > expected_psd_len:
+        psd_np = psd_np[:expected_psd_len]
+
+    # Ensure PSD has no zero values
+    min_psd = np.max(psd_np) * 1e-14
+    psd_np = np.maximum(psd_np, min_psd)
+
+    # Create PSD object
     delta_f = 1.0 / (len(signal_np) * delta_t)
     psd_series = FrequencySeries(psd_np, delta_f=delta_f)
 
-    # 使用matched_filter计算SNR
+    # Calculate SNR using matched_filter
     snr = matched_filter(ts_template, ts_signal, psd=psd_series, low_frequency_cutoff=10.0)
 
-    # 返回最大SNR值
+    # Return maximum SNR value
     return abs(snr).max()
 
 
-def crcbqcpsopsd(inParams, psoParams, nRuns, use_two_step=True, actual_params=None):
-    """
-    Particle Swarm Optimization main function for multiple runs
-
-    Parameters:
-    -----------
-    inParams : dict
-        Input parameters
-    psoParams : dict
-        PSO configuration parameters
-    nRuns : int
-        Number of PSO runs
-    use_two_step : bool
-        Whether to use two-step matching process
-    actual_params : dict, optional
-        Actual parameters for validation and error calculation only
-
-    Returns:
-    --------
-    outResults : dict
-        Enhanced results of PSO optimization
-    outStruct : list
-        Detailed results of each PSO run
-    """
-    # Transfer data to CPU (convert from CuPy if needed)
+def crcbqcpsopsd(inParams, psoParams, nRuns, use_two_step=True, actual_params=None, enable_distance_refinement=True):
+    """Particle Swarm Optimization main function"""
+    # Transfer data to CPU
     inParams['dataX'] = np.asarray(inParams['dataX'])
     inParams['dataY'] = np.asarray(inParams['dataY'])
     inParams['psdHigh'] = np.asarray(inParams['psdHigh'])
     inParams['rmax'] = np.asarray(inParams['rmax'])
     inParams['rmin'] = np.asarray(inParams['rmin'])
 
-    # Add signal-only data if provided
+    # Add signal-only data
     if 'dataY_only_signal' in inParams:
         inParams['dataY_only_signal'] = np.asarray(inParams['dataY_only_signal'])
     else:
-        inParams['dataY_only_signal'] = inParams['dataY']  # Use full data if signal-only not provided
+        inParams['dataY_only_signal'] = inParams['dataY']
 
-    # Set default use_lensing parameter to False to start with unlensed models
     inParams['use_lensing'] = False
 
     nSamples = len(inParams['dataX'])
-    nDim = 6  # Fixed to 6 dimensions for gravitational wave problem
+    nDim = 6
 
     # Create fitness function handle
     fHandle = lambda x, returnxVec: glrtqcsig4pso(x, inParams, returnxVec)
 
     outStruct = [{} for _ in range(nRuns)]
 
-    # Enhanced output structure with actual parameter comparison
+    # Output structure
     outResults = {
         'allRunsOutput': [],
         'bestRun': None,
@@ -498,18 +618,19 @@ def crcbqcpsopsd(inParams, psoParams, nRuns, use_two_step=True, actual_params=No
         'delta_t': None,
         'is_lensed': False,
         'lensing_message': "",
-        'classification': None,  # Add classification field
-        'actual_params': actual_params,  # Store the actual parameters for comparison only
-        'param_errors': {},  # Will store parameter errors
-        'model_comparison': {}  # Will store model comparison metrics
+        'classification': None,
+        'actual_params': actual_params,
+        'param_errors': {},
+        'model_comparison': {},
+        'distance_refinement_enabled': enable_distance_refinement
     }
 
-    # Run PSO multiple times with different random seeds
+    # Run PSO multiple times
     for lpruns in range(nRuns):
         currentPSOParams = psoParams.copy()
         currentPSOParams['run'] = lpruns + 1
 
-        # Set different random seeds to ensure different results in multiple runs
+        # Set different random seeds
         seed_value = int(time.time()) + lpruns * 1000
         np.random.seed(seed_value)
 
@@ -532,16 +653,16 @@ def crcbqcpsopsd(inParams, psoParams, nRuns, use_two_step=True, actual_params=No
             'totalFuncEvals': [],
             'is_lensed': False,
             'lensing_message': "",
-            'classification': "noise"  # Default classification
+            'classification': "noise",
+            'distance_refinement': {}
         }
         fitVal[lpruns] = outStruct[lpruns]['bestFitness']
 
-        # Ensure dimensions are handled correctly
+        # Get parameters from best location
         bestLocation = np.asarray(outStruct[lpruns]['bestLocation'])
         if bestLocation.ndim == 1:
-            bestLocation = bestLocation.reshape(1, -1)  # Ensure 2D shape (1, nDim)
+            bestLocation = bestLocation.reshape(1, -1)
 
-        # Get parameters from best location
         _, params = fHandle(bestLocation, returnxVec=1)
 
         # Handle parameter dimensions
@@ -550,7 +671,6 @@ def crcbqcpsopsd(inParams, psoParams, nRuns, use_two_step=True, actual_params=No
         elif isinstance(params, np.ndarray) and params.ndim > 1 and params.shape[0] == 1:
             params = params[0]
 
-        # Convert to numpy if needed
         if not isinstance(params, np.ndarray):
             params = np.asarray(params)
 
@@ -558,25 +678,15 @@ def crcbqcpsopsd(inParams, psoParams, nRuns, use_two_step=True, actual_params=No
 
         # Add two-step matching process if requested
         if use_two_step:
-            # Prepare parameter dictionary
             param_dict = {
-                'r': r,
-                'm_c': m_c,
-                'tc': tc,
-                'phi_c': phi_c,
-                'A': A,
-                'delta_t': delta_t,
-                'dataX': inParams['dataX'],
-                'dataY_only_signal': inParams['dataY_only_signal']  # Pass signal-only data
+                'r': r, 'm_c': m_c, 'tc': tc, 'phi_c': phi_c, 'A': A, 'delta_t': delta_t,
+                'dataX': inParams['dataX'], 'dataY_only_signal': inParams['dataY_only_signal']
             }
 
-            # Execute two-step matching with new A-based classification
+            # Execute two-step matching
             matching_result = two_step_matching(
-                param_dict,
-                inParams['dataY'],
-                inParams['psdHigh'],
-                inParams['sampFreq'],
-                actual_params  # Pass actual parameters for evaluation only
+                param_dict, inParams['dataY'], inParams['psdHigh'],
+                inParams['sampFreq'], actual_params, enable_distance_refinement
             )
 
             # Use matching results
@@ -584,41 +694,36 @@ def crcbqcpsopsd(inParams, psoParams, nRuns, use_two_step=True, actual_params=No
             lensing_message = matching_result['message']
             classification = matching_result['classification']
 
-            # Decide which signal to use based on classification
+            # Update parameters with refined values if available
+            if enable_distance_refinement and 'distance_refinement' in matching_result:
+                distance_ref = matching_result['distance_refinement']
+                if 'refined_distance' in distance_ref:
+                    r = distance_ref['refined_distance']
+
+            # Choose signal based on classification
             if classification == "noise":
-                print("是噪声")
                 estSig = matching_result['unlensed_signal']
             elif classification == "signal":
-                print("是未透镜")
                 estSig = matching_result['unlensed_signal']
             elif classification == "lens_signal":
-                print("是透镜")
                 estSig = matching_result['lensed_signal']
             else:
-                print("默认使用未透镜")
                 estSig = matching_result['unlensed_signal']
 
-            # Store model comparison metrics
             model_comparison = matching_result.get('model_comparison', {})
-
-            # Store parameter errors if actual parameters were provided
             param_errors = matching_result.get('parameter_errors', {})
             actual_comparison = matching_result.get('actual_comparison', {})
+            distance_refinement = matching_result.get('distance_refinement', {})
 
         else:
-            # Use original method to generate signal
-            print('未使用两步匹配过程')
-            # IMPORTANT: Use lensing flag based on A value
             is_lensed = A >= 0.01
             use_lensing = is_lensed
 
             estSig = crcbgenqcsig(inParams['dataX'], r, m_c, tc, phi_c, A, delta_t, use_lensing=use_lensing)
             estSig, _ = normsig4psd(estSig, inParams['sampFreq'], inParams['psdHigh'], 1)
-            # 使用纯信号而不是带噪声的数据进行匹配
             estAmp = innerprodpsd(inParams['dataY_only_signal'], estSig, inParams['sampFreq'], inParams['psdHigh'])
             estSig = estAmp * estSig
 
-            # Generate classification message
             if is_lensed:
                 lensing_message = f"This is a lens signal (A = {A:.6f} >= 0.01)"
                 classification = "lens_signal"
@@ -629,13 +734,14 @@ def crcbqcpsopsd(inParams, psoParams, nRuns, use_two_step=True, actual_params=No
             model_comparison = {}
             param_errors = {}
             actual_comparison = {}
+            distance_refinement = {}
 
-        # Calculate SNR using matched filtering against the pure signal
+        # Calculate SNR using matched filtering
         run_sig = np.real(estSig)
         run_snr_pycbc = calculate_matched_filter_snr(run_sig, inParams['dataY_only_signal'],
                                                      inParams['psdHigh'], inParams['sampFreq'])
 
-        # Update output with SNR calculation and enhanced metrics
+        # Update output
         allRunsOutput.update({
             'fitVal': float(fitVal[lpruns]),
             'r': r,
@@ -649,18 +755,17 @@ def crcbqcpsopsd(inParams, psoParams, nRuns, use_two_step=True, actual_params=No
             'is_lensed': is_lensed,
             'lensing_message': lensing_message,
             'classification': classification,
-            'SNR_pycbc': float(run_snr_pycbc),  # Add SNR value here
-            'model_comparison': model_comparison,  # Add model comparison metrics
-            'param_errors': param_errors,  # Add parameter errors
-            'actual_comparison': actual_comparison  # Add actual comparison
+            'SNR_pycbc': float(run_snr_pycbc),
+            'model_comparison': model_comparison,
+            'param_errors': param_errors,
+            'actual_comparison': actual_comparison,
+            'distance_refinement': distance_refinement
         })
 
         outResults['allRunsOutput'].append(allRunsOutput)
 
     # Find best run
-    fitVal_np = fitVal
-
-    bestRun = np.argmin(fitVal_np)
+    bestRun = np.argmin(fitVal)
     outResults.update({
         'bestRun': int(bestRun),
         'bestFitness': outResults['allRunsOutput'][bestRun]['fitVal'],
@@ -676,90 +781,48 @@ def crcbqcpsopsd(inParams, psoParams, nRuns, use_two_step=True, actual_params=No
         'classification': outResults['allRunsOutput'][bestRun]['classification'],
         'model_comparison': outResults['allRunsOutput'][bestRun].get('model_comparison', {}),
         'param_errors': outResults['allRunsOutput'][bestRun].get('param_errors', {}),
-        'actual_comparison': outResults['allRunsOutput'][bestRun].get('actual_comparison', {})
+        'actual_comparison': outResults['allRunsOutput'][bestRun].get('actual_comparison', {}),
+        'distance_refinement': outResults['allRunsOutput'][bestRun].get('distance_refinement', {})
     })
 
     return outResults, outStruct
 
 
 def crcbpso(fitfuncHandle, nDim, **kwargs):
-    """
-    PSO core algorithm implementation
-
-    Parameters:
-    -----------
-    fitfuncHandle : function
-        Fitness function
-    nDim : int
-        Dimensionality of search space
-    **kwargs : dict
-        PSO configuration parameters
-
-    Returns:
-    --------
-    returnData : dict
-        Results of PSO optimization
-    """
+    """PSO core algorithm implementation"""
     # Default PSO parameters
     psoParams = {
-        'popsize': 50,
-        'maxSteps': 2000,
-        'c1': 2.0,  # Individual learning factor
-        'c2': 2.0,  # Social learning factor
-        'max_velocity': 0.5,  # Maximum velocity limit
-        'w_start': 0.9,  # Initial inertia weight
-        'w_end': 0.4,  # Final inertia weight
-        'run': 1,  # Run number
-        'nbrhdSz': 4,  # Neighborhood size
-        'init_strategy': 'uniform',  # Initialization strategy
-        'disable_early_stop': False  # Whether to disable early stopping
+        'popsize': 40,  # Reduced population size
+        'maxSteps': 1000,  # Reduced iterations
+        'c1': 2.0,
+        'c2': 2.0,
+        'max_velocity': 0.5,
+        'w_start': 0.9,
+        'w_end': 0.4,
+        'run': 1,
+        'nbrhdSz': 4,
+        'init_strategy': 'uniform',
+        'disable_early_stop': False  # Enable early stopping
     }
 
     # Update parameters
     psoParams.update(kwargs)
-
-    # Ensure random number reproducibility
-    if 'seed' in psoParams:
-        np.random.seed(psoParams['seed'])
 
     # Initialize return data structure
     returnData = {
         'totalFuncEvals': 0,
         'bestLocation': np.zeros((1, nDim)),
         'bestFitness': np.inf,
-        'fitnessHistory': []  # Record fitness history for plotting
+        'fitnessHistory': []
     }
 
-    # Standard initialization strategy
+    # Initialize particles
     if psoParams['init_strategy'] == 'uniform':
-        # Standard uniform initialization
         particles = np.random.rand(psoParams['popsize'], nDim)
-    elif psoParams['init_strategy'] == 'gaussian':
-        # Gaussian initialization around the middle of the range
-        particles = np.random.normal(0.5, 0.15, (psoParams['popsize'], nDim))
-        particles = np.clip(particles, 0, 1)  # Clip to [0,1] range
-    elif psoParams['init_strategy'] == 'sobol':
-        # Basic quasi-random initialization with segment division
-        particles = np.zeros((psoParams['popsize'], nDim))
-        for i in range(psoParams['popsize']):
-            for j in range(nDim):
-                segment = i % 10  # Divide range into 10 segments
-                particles[i, j] = (segment / 10) + np.random.rand() / 10
-    elif psoParams['init_strategy'] == 'boundary':
-        # Boundary-biased initialization (more particles near boundaries)
-        particles = np.zeros((psoParams['popsize'], nDim))
-        for i in range(psoParams['popsize']):
-            if i % 3 == 0:  # 1/3 of particles near lower boundary
-                particles[i] = np.random.rand(nDim) * 0.3
-            elif i % 3 == 1:  # 1/3 of particles near upper boundary
-                particles[i] = 0.7 + np.random.rand(nDim) * 0.3
-            else:  # 1/3 of particles uniformly distributed
-                particles[i] = np.random.rand(nDim)
     else:
-        # Default to uniform distribution
         particles = np.random.rand(psoParams['popsize'], nDim)
 
-    # Initialize velocities - smaller initial velocities
+    # Initialize velocities
     velocities = np.random.uniform(-0.05, 0.05, (psoParams['popsize'], nDim))
 
     # Evaluate initial fitness
@@ -779,34 +842,19 @@ def crcbpso(fitfuncHandle, nDim, **kwargs):
     # Record initial fitness
     returnData['fitnessHistory'].append(float(gbest_fitness))
 
-    total_evals = psoParams['popsize']  # Counter: number of fitness evaluations
+    total_evals = psoParams['popsize']
 
     # Early stopping setup
-    if psoParams['disable_early_stop']:
-        no_improvement_count = 0
-        max_no_improvement = psoParams['maxSteps'] * 10  # Set to an unreachable value
-    else:
-        no_improvement_count = 0
-        prev_best_fitness = float(gbest_fitness)
-        max_no_improvement = 10000  # Very loose early stopping condition
-        min_fitness_improvement = 1e-20  # Very small improvement threshold
+    no_improvement_count = 0
+    prev_best_fitness = float(gbest_fitness)
+    max_no_improvement = 500  # Early stopping after 50 iterations without improvement
+    min_fitness_improvement = 1e-8
 
     # Create progress bar
     with tqdm(range(psoParams['maxSteps']), desc=f'Run {psoParams["run"]}', position=0) as pbar:
         for step in pbar:
-            # Update inertia weight - linear decrease
+            # Update inertia weight
             w = psoParams['w_start'] - (psoParams['w_start'] - psoParams['w_end']) * step / psoParams['maxSteps']
-
-            # Velocity reset to escape local optima
-            if step > 0 and step % 30 == 0:
-                # Reset velocity for 25% of particles
-                reset_indices = np.random.choice(psoParams['popsize'], size=psoParams['popsize'] // 4, replace=False)
-                for idx in reset_indices:
-                    velocities[idx] = np.random.uniform(-0.4, 0.4, nDim)
-
-                # Periodically change inertia weight to increase search diversity
-                if step % 100 == 0:
-                    w = np.random.uniform(psoParams['w_end'], psoParams['w_start'])
 
             # Update each particle
             for i in range(psoParams['popsize']):
@@ -816,7 +864,6 @@ def crcbpso(fitfuncHandle, nDim, **kwargs):
                     idx = (i + j) % psoParams['popsize']
                     neighbors.append(idx)
 
-                # Use numpy's argmin for neighbors
                 neighbor_fitness = [float(pbest_fitness[n]) for n in neighbors]
                 best_neighbor_idx = np.argmin(neighbor_fitness)
                 lbest_idx = neighbors[best_neighbor_idx]
@@ -826,29 +873,24 @@ def crcbpso(fitfuncHandle, nDim, **kwargs):
                 r1 = np.random.rand(nDim)
                 r2 = np.random.rand(nDim)
 
-                # Standard velocity update
+                # Velocity update
                 velocities[i] = (w * velocities[i] +
                                  psoParams['c1'] * r1 * (pbest[i] - particles[i]) +
                                  psoParams['c2'] * r2 * (lbest - particles[i]))
 
-                # More conservative velocity limit to prevent overshooting
-                max_vel = psoParams['max_velocity'] * (1 - 0.3 * step / psoParams['maxSteps'])
-
-                # Standard uniform velocity limit
+                # Velocity limit
+                max_vel = psoParams['max_velocity']
                 velocities[i] = np.clip(velocities[i], -max_vel, max_vel)
 
                 # Update position
                 particles[i] += velocities[i]
 
-                # Handle boundary constraints - reflective boundary
-                # If position is out of bounds, reflect back and reverse velocity direction
+                # Handle boundary constraints
                 out_low = particles[i] < 0
                 out_high = particles[i] > 1
 
                 particles[i] = np.where(out_low, -particles[i], particles[i])
                 particles[i] = np.where(out_high, 2 - particles[i], particles[i])
-
-                # Ensure position is in [0,1] range (prevent numerical errors)
                 particles[i] = np.clip(particles[i], 0, 1)
 
                 # Reverse velocity at boundaries
@@ -869,19 +911,14 @@ def crcbpso(fitfuncHandle, nDim, **kwargs):
             if pbest_fitness[current_best_idx] < gbest_fitness:
                 gbest = pbest[current_best_idx].copy()
                 gbest_fitness = pbest_fitness[current_best_idx].copy()
-
-                # Update progress bar information
                 pbar.set_postfix({'fitness': float(gbest_fitness)})
+                no_improvement_count = 0
+                prev_best_fitness = float(gbest_fitness)
 
-                # Reset improvement counter (if early stopping enabled)
-                if not psoParams['disable_early_stop']:
-                    no_improvement_count = 0
-                    prev_best_fitness = float(gbest_fitness)
-
-            # Record best fitness at each step
+            # Record fitness
             returnData['fitnessHistory'].append(float(gbest_fitness))
 
-            # Early stopping logic (if enabled)
+            # Early stopping logic
             if not psoParams['disable_early_stop']:
                 current_best_fitness = float(gbest_fitness)
                 fitness_improvement = abs(current_best_fitness - prev_best_fitness)
@@ -892,49 +929,12 @@ def crcbpso(fitfuncHandle, nDim, **kwargs):
                     no_improvement_count = 0
                     prev_best_fitness = current_best_fitness
 
-                # Only stop in extreme cases, and only after completing 90% of iterations
-                if step > 0.9 * psoParams['maxSteps'] and no_improvement_count >= max_no_improvement:
-                    print(
-                        f"Run {psoParams['run']} stopped after {step + 1} iterations: No improvement for {no_improvement_count} iterations")
+                # Early stopping
+                if no_improvement_count >= max_no_improvement:
+                    print(f"Early stopping at iteration {step + 1}")
                     break
 
-            # More aggressive particle reinitialization strategy to break out of local optima
-            if step > 0 and step % 40 == 0:
-                # Find the worst 20% of particles
-                worst_indices = np.argsort(fitness)[-psoParams['popsize'] // 5:]
-
-                # Standard reset logic
-                for idx in worst_indices:
-                    # Choose initialization strategy
-                    init_method = step % 5
-                    if init_method == 0:
-                        # Uniform random
-                        particles[idx] = np.random.rand(nDim)
-                    elif init_method == 1:
-                        # Add noise around global best
-                        particles[idx] = np.clip(gbest + np.random.normal(0, 0.3, nDim), 0, 1)
-                    elif init_method == 2:
-                        # Explore near boundaries
-                        if np.random.rand() < 0.5:  # Simple coin flip
-                            particles[idx] = np.random.uniform(0, 0.2, nDim)
-                        else:
-                            particles[idx] = np.random.uniform(0.8, 1.0, nDim)
-                    elif init_method == 3:
-                        # Large random jumps
-                        particles[idx] = np.clip(particles[idx] + np.random.uniform(-0.7, 0.7, nDim), 0, 1)
-                    else:
-                        # Random sampling within parameter space
-                        for j in range(nDim):
-                            particles[idx, j] = np.random.uniform(0.1, 0.9)
-
-                    # Use larger velocity range to improve exploration
-                    velocities[idx] = np.random.uniform(-0.3, 0.3, nDim)
-
-                    # Evaluate new position
-                    fitness[idx] = fitfuncHandle(particles[idx:idx + 1], returnxVec=0)
-                    total_evals += 1
-
-    # Update return data when finished
+    # Update return data
     returnData.update({
         'totalFuncEvals': total_evals,
         'bestLocation': gbest.reshape(1, -1),
@@ -945,30 +945,11 @@ def crcbpso(fitfuncHandle, nDim, **kwargs):
 
 
 def glrtqcsig4pso(xVec, params, returnxVec=0):
-    """
-    Improved fitness function calculation
-
-    Parameters:
-    -----------
-    xVec : array
-        Particle position
-    params : dict
-        Input parameters
-    returnxVec : int
-        Whether to return particle position
-
-    Returns:
-    --------
-    fitVal : array
-        Fitness value
-    xVecReal : array (optional)
-        Particle position in real parameter space
-    """
+    """Fitness function calculation"""
     # Ensure input is NumPy array
     if not isinstance(xVec, np.ndarray):
         xVec = np.asarray(xVec)
 
-    # Ensure input dimensions are correct
     if xVec.ndim == 1:
         xVec = xVec.reshape(1, -1)
 
@@ -979,7 +960,7 @@ def glrtqcsig4pso(xVec, params, returnxVec=0):
     # Initialize fitness array
     fitVal = np.full(nPoints, np.inf)
 
-    # Convert standard range [0,1] to actual parameter range
+    # Convert standard range to actual parameter range
     xVecReal = s2rv(xVec, params)
 
     # Calculate fitness for each valid point
@@ -994,278 +975,88 @@ def glrtqcsig4pso(xVec, params, returnxVec=0):
 
 
 def ssrqc(x, params):
-    """
-    Calculate optimal SNR for signal self-match using matched filtering
-
-    Parameters:
-    -----------
-    x : array
-        Signal parameters
-    params : dict
-        Input parameters
-
-    Returns:
-    --------
-    fitness : float
-        Negative matched filtering result
-    """
-    # IMPORTANT: Determine lensing usage based on A parameter value
-    # If A < 0.01, the signal should be unlensed; if A >= 0.01, the signal should be lensed
-    A = x[4]  # The A parameter
+    """Calculate optimal SNR for signal self-match"""
+    # Determine lensing usage based on A parameter
+    A = x[4]
     use_lensing = A >= 0.01
 
-    # Generate signal based on the A parameter value
+    # Generate signal
     qc = crcbgenqcsig(params['dataX'], x[0], x[1], x[2], x[3], x[4], x[5], use_lensing=use_lensing)
 
     # Normalize signal
     qc, _ = normsig4psd(qc, params['sampFreq'], params['psdHigh'], 1)
 
-    # 使用纯信号作为参考模板（而不是带噪声的数据）
+    # Use pure signal as reference
     dataY_templ = params.get('dataY_only_signal', params['dataY_only_signal'])
 
-    # 使用内积计算作为匹配滤波的结果
+    # Calculate inner product
     inPrd = innerprodpsd(dataY_templ, qc, params['sampFreq'], params['psdHigh'])
 
-    # Return negative squared inner product (to minimize)
+    # Return negative squared inner product
     return -np.abs(inPrd) ** 2
 
 
-def normsig4psd(sigVec, sampFreq, psdVec, snr):
-    """
-    Normalize signal according to PSD
-
-    Parameters:
-    -----------
-    sigVec : array
-        Signal vector
-    sampFreq : float
-        Sampling frequency
-    psdVec : array
-        Power spectral density
-    snr : float
-        Desired SNR
-
-    Returns:
-    --------
-    normalizedSig : array
-        Normalized signal
-    normFac : float
-        Normalization factor
-    """
-    nSamples = len(sigVec)
-
-    # 更好地处理PSD向量的边缘情况
-    if psdVec.shape[0] > 1:  # 确保有多个元素
-        # 如果PSD长度与FFT长度不匹配，调整大小
-        psd_len = len(psdVec)
-        if psd_len < nSamples // 2 + 1:
-            # 扩展PSD以覆盖所有正频率
-            extended_psd = np.zeros(nSamples // 2 + 1)
-            extended_psd[:psd_len] = psdVec
-            # 用最后一个值填充剩余部分
-            extended_psd[psd_len:] = psdVec[-1]
-            psdVec = extended_psd
-
-        # 为正负频率创建完整的PSD向量
-        psdVec4Norm = np.zeros(nSamples)
-        psdVec4Norm[:nSamples // 2 + 1] = psdVec[:nSamples // 2 + 1]  # 正频率
-        psdVec4Norm[nSamples // 2 + 1:] = psdVec[1:nSamples // 2][::-1]  # 负频率（镜像）
-    else:
-        # 处理单值PSD的特殊情况
-        psdVec4Norm = np.ones(nSamples) * psdVec[0]
-
-    # 确保PSD没有零值（避免除以零）
-    min_psd = np.max(psdVec4Norm) * 1e-14
-    psdVec4Norm = np.maximum(psdVec4Norm, min_psd)
-
-    # 计算信号的归一化因子
-    fft_sig = np.fft.fft(sigVec)
-
-    # 计算归一化平方和
-    normSigSqrd = np.sum((np.abs(fft_sig) ** 2) / psdVec4Norm) / (sampFreq * nSamples)
-
-    # 避免除以零或非常小的值
-    if np.abs(normSigSqrd) < 1e-10:
-        normFac = 0
-    else:
-        # 计算归一化因子
-        normFac = snr / np.sqrt(np.abs(normSigSqrd))  # 使用绝对值避免复数问题
-
-    return normFac * sigVec, normFac
-
-
 def innerprodpsd(xVec, yVec, sampFreq, psdVals):
-    """
-    Calculate inner product considering PSD - improved matched filtering
-
-    Parameters:
-    -----------
-    xVec : array
-        First signal
-    yVec : array
-        Second signal
-    sampFreq : float
-        Sampling frequency
-    psdVals : array
-        Power spectral density
-
-    Returns:
-    --------
-    inner_product : float
-        Inner product
-    """
-    # 确保输入向量具有一致的长度
+    """Calculate inner product considering PSD"""
+    # Ensure consistent lengths
     if len(xVec) != len(yVec):
-        # 调整长度匹配
         min_len = min(len(xVec), len(yVec))
         xVec = xVec[:min_len]
         yVec = yVec[:min_len]
 
+    # Ensure inputs are numpy arrays
+    if not isinstance(xVec, np.ndarray):
+        xVec = np.asarray(xVec)
+    if not isinstance(yVec, np.ndarray):
+        yVec = np.asarray(yVec)
+    if not isinstance(psdVals, np.ndarray):
+        psdVals = np.asarray(psdVals)
+
+    # Create PyCBC TimeSeries objects
+    delta_t = 1.0 / sampFreq
+    ts_x = TimeSeries(xVec, delta_t=delta_t)
+    ts_y = TimeSeries(yVec, delta_t=delta_t)
+
+    # Handle PSD length adjustment
     nSamples = len(xVec)
+    expected_psd_len = nSamples // 2 + 1
 
-    # 改进PSD处理，类似于normsig4psd
-    if psdVals.shape[0] > 1:  # 确保有多个元素
-        # 如果PSD长度与FFT长度不匹配，调整大小
-        psd_len = len(psdVals)
-        if psd_len < nSamples // 2 + 1:
-            # 扩展PSD以覆盖所有正频率
-            extended_psd = np.zeros(nSamples // 2 + 1)
-            extended_psd[:psd_len] = psdVals
-            # 用最后一个值填充剩余部分
-            extended_psd[psd_len:] = psdVals[-1]
-            psdVals = extended_psd
+    if len(psdVals) < expected_psd_len:
+        extended_psd = np.zeros(expected_psd_len)
+        extended_psd[:len(psdVals)] = psdVals
+        extended_psd[len(psdVals):] = psdVals[-1]
+        psdVals = extended_psd
+    elif len(psdVals) > expected_psd_len:
+        psdVals = psdVals[:expected_psd_len]
 
-        # 为正负频率创建完整的PSD向量
-        psdVec4Norm = np.zeros(nSamples)
-        psdVec4Norm[:nSamples // 2 + 1] = psdVals[:nSamples // 2 + 1]  # 正频率
-        psdVec4Norm[nSamples // 2 + 1:] = psdVals[1:nSamples // 2][::-1]  # 负频率（镜像）
-    else:
-        # 处理单值PSD的特殊情况
-        psdVec4Norm = np.ones(nSamples) * psdVals[0]
+    # Ensure PSD has no zero values
+    min_psd = np.max(psdVals) * 1e-14
+    psdVals = np.maximum(psdVals, min_psd)
 
-    # 确保PSD没有零值（避免除以零）
-    min_psd = np.max(psdVec4Norm) * 1e-14
-    psdVec4Norm = np.maximum(psdVec4Norm, min_psd)
+    # Create PyCBC FrequencySeries object for PSD
+    delta_f = 1.0 / (nSamples * delta_t)
+    psd_series = FrequencySeries(psdVals, delta_f=delta_f)
 
-    # 计算FFT
-    fftX = np.fft.fft(xVec)
-    fftY = np.fft.fft(yVec)
+    try:
+        # Use PyCBC's matched filter to compute inner product
+        mf_result = matched_filter(ts_y, ts_x, psd=psd_series, low_frequency_cutoff=10.0)
+        inner_product = abs(mf_result).max()
+        return float(inner_product)
 
-    # 计算内积（匹配滤波）
-    inner_product = np.sum((fftX * np.conj(fftY)) / psdVec4Norm) / (sampFreq * nSamples)
-
-    # 返回实部
-    return np.real(inner_product)
+    except Exception as e:
+        print(f"Warning in PyCBC inner product calculation: {e}")
+        return 0.0
 
 
 def s2rv(xVec, params):
-    """
-    Convert parameters from standard range [0,1] to actual range
-
-    Parameters:
-    -----------
-    xVec : array
-        Particle position in standard range [0,1]
-    params : dict
-        Input parameters
-
-    Returns:
-    --------
-    xVecReal : array
-        Particle position in real parameter space
-    """
+    """Convert parameters from standard range [0,1] to actual range"""
     rmax = np.asarray(params['rmax'])
     rmin = np.asarray(params['rmin'])
-
-    # Use standard ranges
     return xVec * (rmax - rmin) + rmin
 
 
 def crcbchkstdsrchrng(xVec):
-    """
-    Check if particles are within standard range [0,1]
-
-    Parameters:
-    -----------
-    xVec : array
-        Particle position
-
-    Returns:
-    --------
-    valid_pts : array
-        Boolean array indicating valid points
-    """
+    """Check if particles are within standard range [0,1]"""
     if not isinstance(xVec, np.ndarray):
         xVec = np.asarray(xVec)
-
-    # Check if all elements in each row are within [0,1] range
     return np.all((xVec >= 0) & (xVec <= 1), axis=1)
-
-
-def calculate_snr_pycbc(signal, psd, fs):
-    """
-    Calculate SNR using PyCBC
-
-    Parameters:
-    -----------
-    signal : array
-        Signal
-    psd : array
-        Power spectral density
-    fs : float
-        Sampling frequency
-
-    Returns:
-    --------
-    max_snr : float
-        Maximum SNR value
-    """
-    # Ensure data is NumPy array
-    if not isinstance(signal, np.ndarray):
-        signal = np.asarray(signal)
-    if not isinstance(psd, np.ndarray):
-        psd = np.asarray(psd)
-
-    # Create PyCBC TimeSeries object
-    delta_t = 1.0 / fs
-    ts_signal = TimeSeries(signal, delta_t=delta_t)
-
-    # Create PyCBC FrequencySeries object
-    delta_f = 1.0 / (len(signal) * delta_t)
-    psd_series = FrequencySeries(psd, delta_f=delta_f)
-
-    # Calculate SNR using matched_filter
-    snr = pycbc.filter.matched_filter(ts_signal, ts_signal, psd=psd_series, low_frequency_cutoff=10.0)
-
-    # Get maximum SNR value
-    max_snr = abs(snr).max()
-
-    return float(max_snr)
-
-
-def analyze_mismatch(data, h_lens, samples, psdHigh):
-    """
-    Calculate mismatch using PyCBC match function
-
-    Parameters:
-    -----------
-    data : array
-        Reference data
-    h_lens : array
-        Signal to compare
-    samples : float
-        Sampling frequency
-    psdHigh : array
-        Power spectral density
-
-    Returns:
-    --------
-    epsilon : float
-        Mismatch value
-    """
-    # Use PyCBC match function for more accurate mismatch calculation
-    match_value = pycbc_calculate_match(h_lens, data, samples, psdHigh)
-
-    # Calculate mismatch as 1 - match
-    epsilon = 1 - match_value
-    return epsilon

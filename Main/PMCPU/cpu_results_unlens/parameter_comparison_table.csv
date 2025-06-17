@@ -1,7 +1,0 @@
-Parameter,Unit,True Value,PSO Estimate,PSO Error (%),MCMC Estimate,MCMC Error (%)
-Distance,Mpc,3100.0000,1.0698,99.97,956.2487,69.15
-Chirp Mass,M☉,30.0900,30.0947,0.02,30.0907,0.00
-Merger Time,s,7.5000,7.5000,0.00,7.5000,0.00
-Phase,rad,0.7854,0.2498,68.19,0.2547,67.57
-Flux Ratio,,0.3333,0.0013,99.60,0.0091,97.27
-Time Delay,s,0.9854,1.6478,67.23,1.5658,58.90

@@ -1,6 +1,0 @@
-Metric,PSO,MCMC
-Execution Time (s),1028.92,1893.23
-Speed Improvement Factor,1.84×,1.0× (baseline)
-Signal-to-Noise Ratio,16.68,15.41
-Template Match,1.0000,0.9997
-Average Parameter Error (%),74.97,79.39
