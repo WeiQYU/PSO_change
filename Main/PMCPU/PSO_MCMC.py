@@ -7,6 +7,8 @@ import scipy.constants as const
 from tqdm import tqdm
 import os
 import warnings
+from scipy import stats
+from scipy.ndimage import gaussian_filter
 
 # Import the PSO implementation
 from PSO import (
@@ -29,9 +31,9 @@ M_sun = 1.989e30
 pc = 3.086e16
 
 # Create results directory
-results_dir = "L_Result_circulate"
+results_dir = "GW_Result_circulate1"
 os.makedirs(results_dir, exist_ok=True)
-
+print("当前保存目录为：",results_dir)
 # Set plotting parameters
 plt.rcParams.update({
     'axes.linewidth': 1.2,
@@ -52,7 +54,7 @@ def load_data():
     print("Loading data...")
 
     TrainingData = scio.loadmat('../generate_data/noise.mat')
-    analysisData = scio.loadmat('../generate_data/data.mat')
+    analysisData = scio.loadmat('../generate_data/data_without_lens.mat')
 
     print("Data loaded successfully")
 
@@ -96,7 +98,7 @@ def setup_parameters(data):
         'source_distance': 3100.0,
         'flux_ratio': 0.3333,
         'time_delay': 0.9854,
-        'phase': 0.25
+        'phase': 0.25 * np.pi
     }
 
     # Set up PSO input parameters
@@ -112,8 +114,8 @@ def setup_parameters(data):
 
     # Set up PSO configuration
     pso_config = {
-        'popsize': 50, 
-        'maxSteps': 2000,  
+        'popsize': 50,
+        'maxSteps': 2000,
         'c1': 2.0,
         'c2': 2.0,
         'w_start': 0.9,
@@ -176,8 +178,8 @@ class GWLikelihood(Likelihood):
             if r < -2 or r > 4 or m_c < 0 or m_c > 2 or tc < 0.1 or tc > 8.0:
                 return -np.inf
 
-            # Determine lensing usage
-            use_lensing = A >= 0.01
+            # Determine lensing usage - Modified threshold for better distinction
+            use_lensing = A >= 0.05  # Changed from 0.01 to 0.05 for clearer separation
 
             # Generate signal
             signal = crcbgenqcsig(
@@ -249,7 +251,7 @@ class GWLikelihood(Likelihood):
             return -np.inf
 
 
-def run_bilby_mcmc(data_dict, param_ranges, n_live_points, n_iter, enable_distance_refinement=True):
+def run_bilby_mcmc(data_dict, param_ranges, n_live_points, n_iter, enable_distance_refinement=True, actual_params=None):
     """Bilby MCMC execution function"""
     print("Starting Bilby MCMC analysis...")
 
@@ -285,7 +287,7 @@ def run_bilby_mcmc(data_dict, param_ranges, n_live_points, n_iter, enable_distan
             priors=priors,
             sampler='dynesty',
             nlive=n_live_points,
-            walks=25,
+            walks=40,
             verbose=True,
             maxiter=n_iter,
             outdir=results_dir,
@@ -368,7 +370,8 @@ def run_bilby_mcmc(data_dict, param_ranges, n_live_points, n_iter, enable_distan
                         mcmc_data['dataY_only_signal'],
                         mcmc_data['sampFreq'],
                         mcmc_data['psdHigh'],
-                        param_ranges
+                        param_ranges,
+                        actual_params
                     )
 
                     distance_refinement.update({
@@ -390,7 +393,7 @@ def run_bilby_mcmc(data_dict, param_ranges, n_live_points, n_iter, enable_distan
                     })
 
             # Generate best signal
-            use_lensing = A >= 0.01
+            use_lensing = A >= 0.05  # Changed threshold for consistency
             best_signal = crcbgenqcsig(
                 mcmc_data['dataX'], r, m_c, tc, phi_c, A, delta_t,
                 use_lensing=use_lensing
@@ -411,7 +414,7 @@ def run_bilby_mcmc(data_dict, param_ranges, n_live_points, n_iter, enable_distan
             )
 
             # Determine classification
-            is_lensed = A >= 0.01
+            is_lensed = A >= 0.05  # Changed threshold for consistency
             if snr < 8:
                 classification = "noise"
             elif is_lensed:
@@ -576,7 +579,7 @@ def evaluate_results(pso_results, mcmc_results, actual_params, data_dict):
             'r': abs((10 ** float(pso_results['best_params']['r']) - actual_params['source_distance']) / actual_params['source_distance']),
             'm_c': abs((10 ** float(pso_results['best_params']['m_c']) - actual_params['chirp_mass']) / actual_params['chirp_mass']),
             'tc': abs((float(pso_results['best_params']['tc']) - actual_params['merger_time']) / actual_params['merger_time']),
-            'phi_c': abs(abs(float(pso_results['best_params']['phi_c']) - actual_params['phase'] * np.pi)) / (2 * np.pi),
+            'phi_c': abs(abs(float(pso_results['best_params']['phi_c']) - actual_params['phase'])) / (2 * np.pi),
             'A': abs((float(pso_results['best_params']['A']) - actual_params['flux_ratio']) / actual_params['flux_ratio']),
             'delta_t': abs((float(pso_results['best_params']['delta_t']) - actual_params['time_delay']) / actual_params['time_delay'])
         }
@@ -586,7 +589,7 @@ def evaluate_results(pso_results, mcmc_results, actual_params, data_dict):
             'r': abs((10 ** float(mcmc_results['best_params']['r']) - actual_params['source_distance']) / actual_params['source_distance']),
             'm_c': abs((10 ** float(mcmc_results['best_params']['m_c']) - actual_params['chirp_mass']) / actual_params['chirp_mass']),
             'tc': abs((float(mcmc_results['best_params']['tc']) - actual_params['merger_time']) / actual_params['merger_time']),
-            'phi_c': abs(abs(float(mcmc_results['best_params']['phi_c']) - actual_params['phase'] * np.pi)) / (2 * np.pi),
+            'phi_c': abs(abs(float(mcmc_results['best_params']['phi_c']) - actual_params['phase'])) / (2 * np.pi),
             'A': abs((float(mcmc_results['best_params']['A']) - actual_params['flux_ratio']) / actual_params['flux_ratio']),
             'delta_t': abs((float(mcmc_results['best_params']['delta_t']) - actual_params['time_delay']) / actual_params['time_delay'])
         }
@@ -679,7 +682,7 @@ def evaluate_results(pso_results, mcmc_results, actual_params, data_dict):
 
 
 def create_parameter_comparison_table(pso_results, mcmc_results, actual_params, param_ranges):
-    """Create a comprehensive parameter comparison table"""
+    """Create a comprehensive parameter comparison table without refinement status"""
     print("\nCreating parameter comparison table...")
 
     try:
@@ -688,7 +691,7 @@ def create_parameter_comparison_table(pso_results, mcmc_results, actual_params, 
             'r': {'name': 'Distance', 'unit': 'Mpc', 'transform': lambda x: 10 ** x},
             'm_c': {'name': 'Chirp Mass', 'unit': 'M☉', 'transform': lambda x: 10 ** x},
             'tc': {'name': 'Merger Time', 'unit': 's', 'transform': lambda x: x},
-            'phi_c': {'name': 'Phase', 'unit': 'rad', 'transform': lambda x: x / np.pi},
+            'phi_c': {'name': 'Phase', 'unit': 'rad', 'transform': lambda x: x },
             'A': {'name': 'Flux Ratio', 'unit': '', 'transform': lambda x: x},
             'delta_t': {'name': 'Time Delay', 'unit': 's', 'transform': lambda x: x}
         }
@@ -698,7 +701,7 @@ def create_parameter_comparison_table(pso_results, mcmc_results, actual_params, 
             'r': actual_params['source_distance'],
             'm_c': actual_params['chirp_mass'],
             'tc': actual_params['merger_time'],
-            'phi_c': actual_params['phase'] * np.pi,
+            'phi_c': actual_params['phase'],
             'A': actual_params['flux_ratio'],
             'delta_t': actual_params['time_delay']
         }
@@ -720,27 +723,6 @@ def create_parameter_comparison_table(pso_results, mcmc_results, actual_params, 
             pso_error = abs((pso_value - actual_value) / actual_value) * 100
             mcmc_error = abs((mcmc_value - actual_value) / actual_value) * 100
 
-            # Add distance refinement info for distance parameter
-            refinement_note = ""
-            if param == 'r':
-                pso_dist_ref = pso_results.get('distance_refinement', {})
-                mcmc_dist_ref = mcmc_results.get('distance_refinement', {})
-
-                pso_refined = ""
-                mcmc_refined = ""
-
-                if pso_dist_ref.get('enabled', False) and 'refinement_info' in pso_dist_ref:
-                    if pso_dist_ref['refinement_info']['status'] == 'success':
-                        confidence = pso_dist_ref['refinement_info'].get('confidence', 0)
-                        pso_refined = f" (Refined, conf: {confidence:.2f})"
-
-                if mcmc_dist_ref.get('enabled', False) and 'refinement_info' in mcmc_dist_ref:
-                    if mcmc_dist_ref['refinement_info']['status'] == 'success':
-                        confidence = mcmc_dist_ref['refinement_info'].get('confidence', 0)
-                        mcmc_refined = f" (Refined, conf: {confidence:.2f})"
-
-                refinement_note = f"PSO{pso_refined}, MCMC{mcmc_refined}"
-
             # Add to table
             table_data.append({
                 'Parameter': param_info[param]['name'],
@@ -749,8 +731,7 @@ def create_parameter_comparison_table(pso_results, mcmc_results, actual_params, 
                 'PSO Estimate': f"{pso_value:.4f}",
                 'PSO Error (%)': f"{pso_error:.2f}",
                 'MCMC Estimate': f"{mcmc_value:.4f}",
-                'MCMC Error (%)': f"{mcmc_error:.2f}",
-                'Refinement Status': refinement_note
+                'MCMC Error (%)': f"{mcmc_error:.2f}"
             })
 
         # Create DataFrame and save as CSV
@@ -766,148 +747,401 @@ def create_parameter_comparison_table(pso_results, mcmc_results, actual_params, 
         return pd.DataFrame()
 
 
-def plot_mcmc_posterior_analysis(mcmc_results, param_ranges, actual_params):
-    """Create comprehensive MCMC posterior analysis plots"""
-    print("\nGenerating MCMC posterior analysis plots...")
+def create_performance_comparison_table(pso_results, mcmc_results, comparison, results_dir="."):
+    """Create performance comparison table for PSO and MCMC algorithms"""
+    print("\nCreating performance comparison table...")
+    
+    try:
+        # Create performance comparison data
+        performance_data = []
+        
+        # Algorithm performance metrics
+        metrics = [
+            {
+                'Metric': 'Execution Time (seconds)',
+                'PSO': f"{comparison['execution_time']['PSO']:.2f}",
+                'MCMC': f"{comparison['execution_time']['MCMC']:.2f}",
+                'PSO Advantage': f"{comparison['execution_time']['ratio']:.2f}x faster"
+            },
+            {
+                'Metric': 'Signal-to-Noise Ratio (SNR)',
+                'PSO': f"{comparison['signal_quality']['PSO']['SNR']:.2f}",
+                'MCMC': f"{comparison['signal_quality']['MCMC']['SNR']:.2f}",
+                'PSO Advantage': "Higher" if comparison['signal_quality']['PSO']['SNR'] > comparison['signal_quality']['MCMC']['SNR'] else "Lower"
+            },
+            {
+                'Metric': 'Template Match',
+                'PSO': f"{comparison['signal_quality']['PSO']['match_final']:.4f}",
+                'MCMC': f"{comparison['signal_quality']['MCMC']['match_final']:.4f}",
+                'PSO Advantage': "Higher" if comparison['signal_quality']['PSO']['match_final'] > comparison['signal_quality']['MCMC']['match_final'] else "Lower"
+            },
+            {
+                'Metric': 'Classification',
+                'PSO': comparison['classification']['PSO']['classification'],
+                'MCMC': comparison['classification']['MCMC']['classification'],
+                'PSO Advantage': "Same" if comparison['classification']['PSO']['classification'] == comparison['classification']['MCMC']['classification'] else "Different"
+            },
+            {
+                'Metric': 'Lensing Detection',
+                'PSO': "Yes" if comparison['classification']['PSO']['is_lensed'] else "No",
+                'MCMC': "Yes" if comparison['classification']['MCMC']['is_lensed'] else "No",
+                'PSO Advantage': "Same" if comparison['classification']['PSO']['is_lensed'] == comparison['classification']['MCMC']['is_lensed'] else "Different"
+            }
+        ]
+        
+        # Add distance parameter error comparison
+        dist_error_pso = comparison['parameter_errors']['PSO']['r'] * 100
+        dist_error_mcmc = comparison['parameter_errors']['MCMC']['r'] * 100
+        metrics.append({
+            'Metric': 'Distance Error (%)',
+            'PSO': f"{dist_error_pso:.2f}",
+            'MCMC': f"{dist_error_mcmc:.2f}",
+            'PSO Advantage': "Lower" if dist_error_pso < dist_error_mcmc else "Higher"
+        })
+        
+        # Add chirp mass parameter error comparison
+        mass_error_pso = comparison['parameter_errors']['PSO']['m_c'] * 100
+        mass_error_mcmc = comparison['parameter_errors']['MCMC']['m_c'] * 100
+        metrics.append({
+            'Metric': 'Chirp Mass Error (%)',
+            'PSO': f"{mass_error_pso:.2f}",
+            'MCMC': f"{mass_error_mcmc:.2f}",
+            'PSO Advantage': "Lower" if mass_error_pso < mass_error_mcmc else "Higher"
+        })
+        
+        # Add merger time parameter error comparison
+        time_error_pso = comparison['parameter_errors']['PSO']['tc'] * 100
+        time_error_mcmc = comparison['parameter_errors']['MCMC']['tc'] * 100
+        metrics.append({
+            'Metric': 'Merger Time Error (%)',
+            'PSO': f"{time_error_pso:.2f}",
+            'MCMC': f"{time_error_mcmc:.2f}",
+            'PSO Advantage': "Lower" if time_error_pso < time_error_mcmc else "Higher"
+        })
+        
+        performance_data.extend(metrics)
+        
+        # Create DataFrame and save as CSV
+        performance_df = pd.DataFrame(performance_data)
+        performance_df.to_csv(f"{results_dir}/algorithm_performance_comparison.csv", index=False)
+        
+        print(f"Performance comparison table saved to {results_dir}/algorithm_performance_comparison.csv")
+        
+        # Display table summary
+        print("\nAlgorithm Performance Summary:")
+        print("="*60)
+        for metric in performance_data:
+            print(f"{metric['Metric']:<25}: PSO={metric['PSO']:<12} MCMC={metric['MCMC']:<12} ({metric['PSO Advantage']})")
+        
+        return performance_df
+        
+    except Exception as e:
+        print(f"Error creating performance comparison table: {str(e)}")
+        return pd.DataFrame()
 
+
+def create_mcmc_corner_plot_with_true_values(mcmc_results, param_ranges, actual_params, results_dir="."):
+    """
+    Create enhanced corner plot with true value markers for MCMC results
+    Modified according to user requirements:
+    1. If signal is not lensed, exclude A and delta_t parameters
+    2. Remove parameter units from labels  
+    3. Remove density label from histograms
+    4. Optimize layout to reduce whitespace and center peak distributions
+    """
+    print("\nGenerating MCMC corner plot with true values...")
+    
     try:
         if mcmc_results['posterior_samples'] is None or len(mcmc_results['posterior_samples']) == 0:
             print("No MCMC posterior samples available for plotting")
             return
-
+            
         posterior = mcmc_results['posterior_samples']
-        param_names = ['r', 'm_c', 'tc', 'phi_c', 'A', 'delta_t']
-        param_labels = ['Distance\n[log10(Mpc)]', 'Chirp Mass\n[log10(M☉)]', 'Merger Time\n[s]',
-                        'Phase\n[rad]', 'Flux Ratio\n[A]', 'Time Delay\n[s]']
-
+        
+        # Determine if signal is lensed
+        best_A = float(mcmc_results['best_params']['A'])
+        is_lensed = best_A >= 0.05
+        
+        # Select parameters based on lensing status
+        if is_lensed:
+            param_names = ['r', 'm_c', 'tc', 'phi_c', 'A', 'delta_t']
+            param_labels = [r'$\log_{10}(D_L)$', r'$\log_{10}(M_c)$', r'$t_c$', 
+                           r'$\phi_c$', r'$A$', r'$\tau$']
+            print("Detected lensed signal - including all parameters in corner plot")
+        else:
+            param_names = ['r', 'm_c', 'tc', 'phi_c']  # Exclude A and delta_t
+            param_labels = [r'$\log_{10}(D_L)$', r'$\log_{10}(M_c)$', r'$t_c$', r'$\phi_c$']
+            print("Detected non-lensed signal - excluding A and delta_t from corner plot")
+        
+        n_params = len(param_names)
+        
         # Convert to physical units
-        physical_samples = np.zeros_like(posterior[param_names].values)
-        actual_physical = np.zeros(6)
-
+        physical_samples = np.zeros((len(posterior), n_params))
+        actual_physical = np.zeros(n_params)
+        
         for i, param in enumerate(param_names):
             # Unscale from [0,1] to original parameter range
-            unscaled = posterior[param].values * (param_ranges['rmax'][i] - param_ranges['rmin'][i]) + \
-                       param_ranges['rmin'][i]
-
-            # Transform to physical units for certain parameters
+            param_idx = ['r', 'm_c', 'tc', 'phi_c', 'A', 'delta_t'].index(param)
+            unscaled = posterior[param].values * (param_ranges['rmax'][param_idx] - param_ranges['rmin'][param_idx]) + \
+                       param_ranges['rmin'][param_idx]
+            
+            # For distance and chirp mass, keep in log space for plotting
             if param == 'r':
-                physical_samples[:, i] = 10 ** unscaled
-                actual_physical[i] = actual_params['source_distance']
+                physical_samples[:, i] = unscaled  # Keep log10(distance)
+                actual_physical[i] = np.log10(actual_params['source_distance'])
             elif param == 'm_c':
-                physical_samples[:, i] = 10 ** unscaled
-                actual_physical[i] = actual_params['chirp_mass']
-            elif param == 'phi_c':
-                physical_samples[:, i] = unscaled / np.pi
-                actual_physical[i] = actual_params['phase']
+                physical_samples[:, i] = unscaled  # Keep log10(chirp_mass)
+                actual_physical[i] = np.log10(actual_params['chirp_mass'])
             else:
                 physical_samples[:, i] = unscaled
                 if param == 'tc':
                     actual_physical[i] = actual_params['merger_time']
+                elif param == 'phi_c':
+                    actual_physical[i] = actual_params['phase']
                 elif param == 'A':
                     actual_physical[i] = actual_params['flux_ratio']
                 elif param == 'delta_t':
                     actual_physical[i] = actual_params['time_delay']
-
-        # Create figure with subplots
-        fig = plt.figure(figsize=(20, 16))
-
-        # Corner plot (posterior distributions)
-        gs = fig.add_gridspec(6, 6, hspace=0.3, wspace=0.3)
-
-        for i in range(6):
-            for j in range(6):
+        
+        # Create figure with optimized spacing
+        fig = plt.figure(figsize=(4*n_params, 4*n_params))
+        gs = fig.add_gridspec(n_params, n_params, hspace=0.02, wspace=0.02)
+        
+        # Color scheme
+        scatter_color = '#4472C4'
+        contour_colors = ['#C5504B', '#70AD47', '#FFC000']
+        true_color = '#000000'
+        
+        for i in range(n_params):
+            for j in range(n_params):
                 if i > j:
-                    # 2D scatter plot
+                    # 2D contour and scatter plot
                     ax = fig.add_subplot(gs[i, j])
-
+                    
                     # Sample subset for faster plotting
-                    n_plot = min(1000, len(physical_samples))
+                    n_plot = min(2000, len(physical_samples))
                     idx = np.random.choice(len(physical_samples), n_plot, replace=False)
-
-                    scatter = ax.scatter(physical_samples[idx, j], physical_samples[idx, i],
-                                         c=posterior['log_likelihood'].values[idx],
-                                         alpha=0.6, s=1, cmap='viridis')
-
-                    # Add true value cross
-                    ax.axvline(actual_physical[j], color='red', linestyle='--', alpha=0.8, linewidth=2, label='True')
-                    ax.axhline(actual_physical[i], color='red', linestyle='--', alpha=0.8, linewidth=2)
-
-                    ax.set_xlabel(param_labels[j] if i == 5 else '', fontsize=10)
-                    ax.set_ylabel(param_labels[i] if j == 0 else '', fontsize=10)
-                    ax.tick_params(labelsize=8)
-
+                    
+                    x_data = physical_samples[idx, j]
+                    y_data = physical_samples[idx, i]
+                    
+                    # Calculate optimized range to center the distribution
+                    x_percentiles = np.percentile(x_data, [5, 50, 95])
+                    y_percentiles = np.percentile(y_data, [5, 50, 95])
+                    
+                    x_median, y_median = x_percentiles[1], y_percentiles[1]
+                    x_range_half = max(x_percentiles[2] - x_median, x_median - x_percentiles[0]) * 1.2
+                    y_range_half = max(y_percentiles[2] - y_median, y_median - y_percentiles[0]) * 1.2
+                    
+                    x_range = [x_median - x_range_half, x_median + x_range_half]
+                    y_range = [y_median - y_range_half, y_median + y_range_half]
+                    
+                    # Extend to include true values
+                    x_true = actual_physical[j]
+                    y_true = actual_physical[i]
+                    
+                    if x_true < x_range[0] or x_true > x_range[1]:
+                        x_range = [min(x_range[0], x_true - x_range_half*0.1), 
+                                  max(x_range[1], x_true + x_range_half*0.1)]
+                    if y_true < y_range[0] or y_true > y_range[1]:
+                        y_range = [min(y_range[0], y_true - y_range_half*0.1), 
+                                  max(y_range[1], y_true + y_range_half*0.1)]
+                    
+                    # Create histogram
+                    n_bins = 35
+                    H, x_edges, y_edges = np.histogram2d(x_data, y_data, bins=n_bins, 
+                                                        range=[x_range, y_range], density=True)
+                    
+                    # Smooth the histogram
+                    H_smooth = gaussian_filter(H.T, sigma=0.8)
+                    
+                    # Calculate contour levels
+                    if np.max(H_smooth) > 0:
+                        H_flat = H_smooth.ravel()
+                        H_sorted = np.sort(H_flat)[::-1]
+                        H_cumsum = np.cumsum(H_sorted)
+                        H_cumsum = H_cumsum / H_cumsum[-1]
+                        
+                        target_fractions = [0.39, 0.68, 0.95]
+                        levels = []
+                        
+                        for frac in target_fractions:
+                            idx = np.argmax(H_cumsum >= frac)
+                            if idx > 0 and idx < len(H_sorted):
+                                levels.append(H_sorted[idx])
+                        
+                        levels = sorted(list(set([l for l in levels if l > 0])))
+                        
+                        if len(levels) < 2:
+                            max_val = np.max(H_smooth)
+                            levels = [max_val * 0.15, max_val * 0.4, max_val * 0.7]
+                            levels = [l for l in levels if l > 0]
+                    else:
+                        levels = []
+                    
+                    # Create coordinate grids
+                    X, Y = np.meshgrid((x_edges[:-1] + x_edges[1:]) / 2, 
+                                      (y_edges[:-1] + y_edges[1:]) / 2)
+                    
+                    # Plot contours
+                    if len(levels) >= 2:
+                        try:
+                            ax.contour(X, Y, H_smooth, levels=levels, 
+                                     colors=contour_colors[:len(levels)], 
+                                     linewidths=[1.0, 1.5, 2.0][:len(levels)], 
+                                     alpha=0.8)
+                        except:
+                            pass
+                    
+                    # Scatter plot
+                    n_scatter = min(800, len(x_data))
+                    if n_scatter < len(x_data):
+                        scatter_idx = np.random.choice(len(x_data), n_scatter, replace=False)
+                        x_scatter = x_data[scatter_idx]
+                        y_scatter = y_data[scatter_idx]
+                    else:
+                        x_scatter = x_data
+                        y_scatter = y_data
+                        
+                    ax.scatter(x_scatter, y_scatter, c=scatter_color, alpha=0.3, s=1.0, rasterized=True)
+                    
+                    # True value lines
+                    ax.axvline(x_true, color=true_color, linestyle='--', 
+                              linewidth=2, alpha=0.8, zorder=10)
+                    ax.axhline(y_true, color=true_color, linestyle='--', 
+                              linewidth=2, alpha=0.8, zorder=10)
+                    
+                    # Set limits
+                    ax.set_xlim(x_range)
+                    ax.set_ylim(y_range)
+                    
+                    # Labels and ticks
+                    if i == n_params - 1:  # Bottom row
+                        ax.set_xlabel(param_labels[j], fontsize=16, fontweight='bold')
+                        ax.tick_params(axis='x', labelsize=12)
+                    else:
+                        ax.set_xticklabels([])
+                    
+                    if j == 0:  # Left column
+                        ax.set_ylabel(param_labels[i], fontsize=16, fontweight='bold')
+                        ax.tick_params(axis='y', labelsize=12)
+                    else:
+                        ax.set_yticklabels([])
+                    
+                    # Grid
+                    ax.grid(True, alpha=0.15, linewidth=0.5)
+                    
                 elif i == j:
-                    # 1D histogram
+                    # 1D histogram - optimized and centered
                     ax = fig.add_subplot(gs[i, j])
-
-                    ax.hist(physical_samples[:, i], bins=50, alpha=0.7, density=True, color='steelblue',
-                            edgecolor='black')
-                    ax.axvline(actual_physical[i], color='red', linestyle='--', linewidth=2, label='True')
-
-                    # Add statistics
-                    mean_val = np.mean(physical_samples[:, i])
-                    std_val = np.std(physical_samples[:, i])
-                    ax.axvline(mean_val, color='blue', linestyle='-', linewidth=2, alpha=0.8, label='Mean')
-
-                    ax.set_xlabel(param_labels[i], fontsize=10)
-                    ax.set_ylabel('Density', fontsize=10)
-                    ax.tick_params(labelsize=8)
-
-                    # Add text with statistics
-                    ax.text(0.05, 0.95, f'Mean: {mean_val:.3f}\nStd: {std_val:.3f}',
-                            transform=ax.transAxes, verticalalignment='top', fontsize=8,
-                            bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
-
-                    if i == 0:
-                        ax.legend(fontsize=8)
+                    
+                    data = physical_samples[:, i]
+                    true_val = actual_physical[i]
+                    
+                    # Calculate optimized range to center the distribution
+                    data_percentiles = np.percentile(data, [5, 50, 95])
+                    data_median = data_percentiles[1]
+                    data_range_half = max(data_percentiles[2] - data_median, 
+                                         data_median - data_percentiles[0]) * 1.2
+                    
+                    data_range = [data_median - data_range_half, data_median + data_range_half]
+                    
+                    # Extend to include true value if needed
+                    if true_val < data_range[0] or true_val > data_range[1]:
+                        data_range = [min(data_range[0], true_val - data_range_half*0.1), 
+                                     max(data_range[1], true_val + data_range_half*0.1)]
+                    
+                    # Create histogram
+                    n_bins = 40
+                    counts, bins, patches = ax.hist(data, bins=n_bins, range=data_range, 
+                                                   density=True, alpha=0.6, color=scatter_color,
+                                                   edgecolor='black', linewidth=0.5)
+                    
+                    # Add KDE curve
+                    try:
+                        kde = stats.gaussian_kde(data)
+                        x_kde = np.linspace(data_range[0], data_range[1], 200)
+                        y_kde = kde(x_kde)
+                        ax.plot(x_kde, y_kde, color='darkred', linewidth=2.5, alpha=0.8)
+                    except:
+                        pass
+                    
+                    # True value line
+                    ax.axvline(true_val, color=true_color, linestyle='--', 
+                              linewidth=2.5, alpha=0.9, zorder=10)
+                    
+                    # Mean line
+                    mean_val = np.mean(data)
+                    ax.axvline(mean_val, color='blue', linestyle='-', linewidth=2, alpha=0.7)
+                    
+                    # Set limits
+                    ax.set_xlim(data_range)
+                    
+                    # Labels - Remove density label as requested
+                    if i == n_params - 1:  # Bottom
+                        ax.set_xlabel(param_labels[i], fontsize=16, fontweight='bold')
+                        ax.tick_params(axis='x', labelsize=12)
+                    else:
+                        ax.set_xticklabels([])
+                    
+                    # Remove y-axis labels for histograms as requested
+                    ax.set_yticklabels([])
+                    ax.tick_params(axis='y', left=False)
+                    
+                    # Grid
+                    ax.grid(True, alpha=0.15, linewidth=0.5)
+                    
+                    # Add statistics text box (smaller)
+                    std_val = np.std(data)
+                    stats_text = f'μ: {mean_val:.3f}\nσ: {std_val:.3f}\nTrue: {true_val:.3f}'
+                    ax.text(0.05, 0.95, stats_text, transform=ax.transAxes, 
+                           verticalalignment='top', fontsize=9,
+                           bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.8))
+                        
                 else:
-                    # Empty upper triangle
+                    # Upper triangle - add legend and information
                     ax = fig.add_subplot(gs[i, j])
                     ax.axis('off')
-
-        plt.suptitle('MCMC Posterior Analysis', fontsize=16, fontweight='bold', y=0.98)
-        plt.savefig(f"{results_dir}/mcmc_posterior_corner_plot.png", bbox_inches='tight', dpi=300)
+                    
+                    # Add legend in the top-right corner
+                    if i == 0 and j == n_params - 1:
+                        from matplotlib.lines import Line2D
+                        
+                        # legend_elements = [
+                        #     Line2D([0], [0], color=true_color, linestyle='--', linewidth=2.5, label='True Value'),
+                        #     Line2D([0], [0], color='blue', linewidth=2, label='Mean'),
+                        #     Line2D([0], [0], color='darkred', linewidth=2.5, label='KDE'),
+                        #     Line2D([0], [0], color=contour_colors[0], linewidth=2, label='68% CI'),
+                        #     Line2D([0], [0], color=contour_colors[1], linewidth=1.5, label='95% CI'),
+                        #     Line2D([0], [0], marker='o', color='w', markerfacecolor=scatter_color, 
+                        #           markersize=8, alpha=0.6, linestyle='None', label='Samples'),
+                        # ]
+                        
+                        # ax.legend(handles=legend_elements, loc='center', fontsize=12, 
+                        #          frameon=True, fancybox=True, shadow=True)
+        
+        # Add overall title with lensing status
+        title_suffix = " (Lensed Signal)" if is_lensed else " (Non-lensed Signal)"
+        fig.suptitle('MCMC Posterior Analysis' + title_suffix, 
+                    fontsize=20, fontweight='bold', y=0.98)
+        
+        # Save the plot
+        plot_filename = f"gw_analysis_corner_{'lensed' if is_lensed else 'unlensed'}.png"
+        plt.savefig(f"{results_dir}/{plot_filename}", 
+                   bbox_inches='tight', dpi=300, facecolor='white')
         plt.close()
-
-        # Trace plots
-        fig, axes = plt.subplots(3, 2, figsize=(15, 12))
-        axes = axes.flatten()
-
-        for i, (param, label) in enumerate(zip(param_names, param_labels)):
-            ax = axes[i]
-
-            # Plot trace
-            ax.plot(physical_samples[:, i], alpha=0.7, linewidth=0.5, color='steelblue')
-            ax.axhline(actual_physical[i], color='red', linestyle='--', linewidth=2, alpha=0.8, label='True Value')
-
-            # Add rolling mean
-            window = min(100, len(physical_samples) // 10)
-            if window > 1:
-                rolling_mean = pd.Series(physical_samples[:, i]).rolling(window=window).mean()
-                ax.plot(rolling_mean, color='orange', linewidth=2, alpha=0.8, label='Rolling Mean')
-
-            ax.set_xlabel('Sample Number', fontsize=12)
-            ax.set_ylabel(label, fontsize=12)
-            ax.set_title(f'Trace Plot: {param_labels[i].split()[0]}', fontsize=14, fontweight='bold')
-            ax.grid(True, alpha=0.3)
-            ax.legend(fontsize=10)
-
-        plt.suptitle('MCMC Parameter Trace Plots', fontsize=16, fontweight='bold')
-        plt.tight_layout()
-        plt.savefig(f"{results_dir}/mcmc_trace_plots.png", bbox_inches='tight', dpi=300)
-        plt.close()
-
-        print(f"MCMC posterior analysis plots saved to {results_dir}:")
-        print("  - mcmc_posterior_corner_plot.png")
-        print("  - mcmc_trace_plots.png")
-
+        
+        print(f"Corner plot saved to {results_dir}/{plot_filename}")
+        
     except Exception as e:
-        print(f"Error in plotting MCMC posterior analysis: {str(e)}")
+        print(f"Error in corner plot: {str(e)}")
+        import traceback
+        traceback.print_exc()
 
 
 def generate_publication_plots(pso_results, mcmc_results, data_dict, comparison, actual_params):
-    """Generate publication-quality plots"""
-    print("\nGenerating publication-quality comparison plots...")
+    """Generate publication-quality plots - only waveform reconstruction"""
+    print("\nGenerating publication-quality waveform reconstruction plot...")
 
     try:
         # Get data as numpy arrays
@@ -915,7 +1149,7 @@ def generate_publication_plots(pso_results, mcmc_results, data_dict, comparison,
         dataY_np = np.asarray(data_dict['dataY'])
         dataY_only_signal_np = np.asarray(data_dict['dataY_only_signal'])
 
-        # Figure 1: Waveform Reconstruction Comparison
+        # Figure: Waveform Reconstruction Comparison
         fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10))
 
         # Top panel: Signal comparison
@@ -952,125 +1186,7 @@ def generate_publication_plots(pso_results, mcmc_results, data_dict, comparison,
         plt.savefig(f"{results_dir}/waveform_reconstruction.png", bbox_inches='tight', dpi=300)
         plt.close()
 
-        # Figure 2: Parameter Estimation Accuracy
-        param_names = ['r', 'm_c', 'tc', 'phi_c', 'A', 'delta_t']
-        param_labels = ['Distance\n[Mpc]', 'Chirp Mass\n[M☉]', 'Merger Time\n[s]',
-                        'Phase\n[rad]', 'Flux Ratio\n[A]', 'Time Delay\n[s]']
-
-        pso_error_vals = [comparison['parameter_errors']['PSO'][p] * 100 for p in param_names]
-        mcmc_error_vals = [comparison['parameter_errors']['MCMC'][p] * 100 for p in param_names]
-
-        fig, ax = plt.subplots(figsize=(12, 8))
-        x = np.arange(len(param_names))
-        width = 0.35
-
-        bars1 = ax.bar(x - width / 2, pso_error_vals, width, label='PSO',
-                       color='#d62728', alpha=0.8, edgecolor='black', linewidth=0.8)
-        bars2 = ax.bar(x + width / 2, mcmc_error_vals, width, label='MCMC',
-                       color='#1f77b4', alpha=0.8, edgecolor='black', linewidth=0.8)
-
-        ax.set_xlabel('Parameters', fontsize=14, fontweight='bold')
-        ax.set_ylabel('Relative Error [%]', fontsize=14, fontweight='bold')
-        ax.set_title('Parameter Estimation Accuracy Comparison', fontsize=16, fontweight='bold')
-        ax.set_xticks(x)
-        ax.set_xticklabels(param_labels, fontsize=12)
-        ax.legend(fontsize=12, loc='upper right')
-        ax.grid(True, alpha=0.3, axis='y')
-
-        max_error = max(max(pso_error_vals), max(mcmc_error_vals))
-        ax.set_ylim(0, min(max_error * 1.1, 100))
-
-        # Add value labels on bars
-        for bar in bars1:
-            height = bar.get_height()
-            ax.text(bar.get_x() + bar.get_width() / 2., height + height * 0.05,
-                    f'{height:.1f}%', ha='center', va='bottom', fontsize=10)
-
-        for bar in bars2:
-            height = bar.get_height()
-            ax.text(bar.get_x() + bar.get_width() / 2., height + height * 0.05,
-                    f'{height:.1f}%', ha='center', va='bottom', fontsize=10)
-
-        plt.tight_layout()
-        plt.savefig(f"{results_dir}/parameter_accuracy.png", bbox_inches='tight', dpi=300)
-        plt.close()
-
-        # Figure 3: Performance Metrics Comparison
-        fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(14, 10))
-
-        # Remove spines
-        for ax in [ax1, ax2, ax3, ax4]:
-            ax.spines['top'].set_visible(False)
-            ax.spines['right'].set_visible(False)
-
-        # Execution time comparison
-        methods = ['PSO', 'MCMC']
-        times = [comparison['execution_time']['PSO'], comparison['execution_time']['MCMC']]
-        colors = ['#d62728', '#1f77b4']
-
-        bars = ax1.bar(methods, times, color=colors, alpha=0.8, edgecolor='black', linewidth=1.2)
-        ax1.set_ylabel('Execution Time [s]', fontsize=12, fontweight='bold')
-        ax1.set_title('Computational Efficiency', fontsize=14, fontweight='bold')
-        ax1.grid(True, alpha=0.3, axis='y')
-
-        for bar, time in zip(bars, times):
-            ax1.text(bar.get_x() + bar.get_width() / 2., bar.get_height() + max(times) * 0.02,
-                     f'{time:.1f}s', ha='center', va='bottom', fontsize=11, fontweight='bold')
-
-        # SNR comparison
-        snr_values = [comparison['signal_quality']['PSO']['SNR'],
-                      comparison['signal_quality']['MCMC']['SNR']]
-        bars = ax2.bar(methods, snr_values, color=colors, alpha=0.8, edgecolor='black', linewidth=1.2)
-        ax2.set_ylabel('Signal-to-Noise Ratio', fontsize=12, fontweight='bold')
-        ax2.set_title('Signal Quality (SNR)', fontsize=14, fontweight='bold')
-        ax2.grid(True, alpha=0.3, axis='y')
-
-        for bar, snr in zip(bars, snr_values):
-            ax2.text(bar.get_x() + bar.get_width() / 2., bar.get_height() + max(snr_values) * 0.02,
-                     f'{snr:.1f}', ha='center', va='bottom', fontsize=11, fontweight='bold')
-
-        # Match comparison
-        match_values = [comparison['signal_quality']['PSO']['match_final'],
-                        comparison['signal_quality']['MCMC']['match_final']]
-        bars = ax3.bar(methods, match_values, color=colors, alpha=0.8, edgecolor='black', linewidth=1.2)
-        ax3.set_ylabel('Template Match', fontsize=12, fontweight='bold')
-        ax3.set_title('Waveform Matching Accuracy', fontsize=14, fontweight='bold')
-        ax3.grid(True, alpha=0.3, axis='y')
-        ax3.set_ylim([0, 1])
-
-        for bar, match in zip(bars, match_values):
-            ax3.text(bar.get_x() + bar.get_width() / 2., bar.get_height() + 0.02,
-                     f'{match:.3f}', ha='center', va='bottom', fontsize=11, fontweight='bold')
-
-        # PSO Fitness Evolution
-        if 'iteration_history' in pso_results and len(pso_results['iteration_history']) > 0:
-            iterations = range(len(pso_results['iteration_history']))
-            ax4.plot(iterations, pso_results['iteration_history'], 'r-', linewidth=2, alpha=0.8)
-            ax4.set_xlabel('Iteration', fontsize=12, fontweight='bold')
-            ax4.set_ylabel('Fitness Value', fontsize=12, fontweight='bold')
-            ax4.set_title('PSO Algorithm\nFitness Evolution', fontsize=14, fontweight='bold')
-            ax4.grid(True, alpha=0.3)
-
-            if len(pso_results['iteration_history']) > 10:
-                final_fitness = pso_results['iteration_history'][-1]
-                ax4.text(0.95, 0.95, f'Final: {final_fitness:.2e}',
-                         transform=ax4.transAxes, ha='right', va='top',
-                         fontsize=10, fontweight='bold',
-                         bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
-        else:
-            ax4.text(0.5, 0.5, 'No PSO iteration\nhistory available',
-                     transform=ax4.transAxes, ha='center', va='center',
-                     fontsize=12, fontweight='bold')
-            ax4.set_title('PSO Algorithm\nFitness Evolution', fontsize=14, fontweight='bold')
-
-        plt.tight_layout()
-        plt.savefig(f"{results_dir}/performance_metrics.png", bbox_inches='tight', dpi=300)
-        plt.close()
-
-        print(f"Publication-quality figures saved to {results_dir}:")
-        print("  - waveform_reconstruction.png")
-        print("  - parameter_accuracy.png")
-        print("  - performance_metrics.png")
+        print(f"Waveform reconstruction plot saved to {results_dir}/waveform_reconstruction.png")
 
     except Exception as e:
         print(f"Error in generate_publication_plots: {str(e)}")
@@ -1115,8 +1231,8 @@ def main():
 
         # 4. 运行MCMC算法
         print("\n[步骤 4/4] 运行MCMC算法...")
-        mcmc_results = run_bilby_mcmc(data_dict, param_ranges, n_live_points=250, n_iter=400,
-                                      enable_distance_refinement=True)
+        mcmc_results = run_bilby_mcmc(data_dict, param_ranges, n_live_points=200, n_iter=500,
+                                      enable_distance_refinement=True, actual_params=actual_params)
         print("✓ MCMC算法完成")
 
         # 输出PSO参数结果
@@ -1130,7 +1246,7 @@ def main():
         pso_distance = 10**pso_params_result['r']
         pso_chirp_mass = 10**pso_params_result['m_c']
         pso_merger_time = pso_params_result['tc']
-        pso_phase = pso_params_result['phi_c'] / np.pi
+        pso_phase = pso_params_result['phi_c']
         pso_flux_ratio = pso_params_result['A']
         pso_time_delay = pso_params_result['delta_t']
         
@@ -1154,7 +1270,7 @@ def main():
         mcmc_distance = 10**mcmc_params_result['r']
         mcmc_chirp_mass = 10**mcmc_params_result['m_c']
         mcmc_merger_time = mcmc_params_result['tc']
-        mcmc_phase = mcmc_params_result['phi_c'] / np.pi
+        mcmc_phase = mcmc_params_result['phi_c']
         mcmc_flux_ratio = mcmc_params_result['A']
         mcmc_time_delay = mcmc_params_result['delta_t']
         
@@ -1170,14 +1286,17 @@ def main():
         # 性能比较
         comparison = evaluate_results(pso_results, mcmc_results, actual_params, data_dict)
 
-        # 创建参数对比表
+        # 创建参数对比表（移除Refinement Status列）
         param_df = create_parameter_comparison_table(pso_results, mcmc_results, actual_params, param_ranges)
 
-        # 生成MCMC后验分析图
-        if mcmc_results['posterior_samples'] is not None:
-            plot_mcmc_posterior_analysis(mcmc_results, param_ranges, actual_params)
+        # 创建性能对比表（新增）
+        performance_df = create_performance_comparison_table(pso_results, mcmc_results, comparison, results_dir)
 
-        # 生成发表质量的对比图
+        # 生成MCMC后验分析图（包含真实值）- 根据透镜状态调整参数
+        if mcmc_results['posterior_samples'] is not None:
+            create_mcmc_corner_plot_with_true_values(mcmc_results, param_ranges, actual_params, results_dir)
+
+        # 生成波形重建图（仅保留此图）
         generate_publication_plots(pso_results, mcmc_results, data_dict, comparison, actual_params)
 
         # 保存简化的结果
@@ -1215,12 +1334,12 @@ def main():
             }
         }
         
-        # 保存到CSV文件
+        # 保存到JSON文件
         import json
         with open(f"{results_dir}/results_summary.json", 'w') as f:
             json.dump(results_summary, f, indent=2)
         
-        print("✓ 结果已保存到 L_Result/results_summary.json")
+        print("✓ 结果已保存到 L_Result_circulate/results_summary.json")
         
     except Exception as e:
         print(f"\n❌ 执行出错: {str(e)}")

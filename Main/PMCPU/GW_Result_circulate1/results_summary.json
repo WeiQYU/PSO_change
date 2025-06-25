@@ -1,0 +1,30 @@
+{
+  "True_Parameters": {
+    "Distance_Mpc": 3100.0,
+    "Chirp_Mass_Msun": 30.09,
+    "Merger_Time_s": 7.5,
+    "Phase_pi": 0.7853981633974483,
+    "Flux_Ratio": 0.3333,
+    "Time_Delay_s": 0.9854
+  },
+  "PSO_Results": {
+    "Distance_Mpc": 3100.000001811958,
+    "Chirp_Mass_Msun": 30.094639097360794,
+    "Merger_Time_s": 7.49999999985435,
+    "Phase_pi": 0.7853981941871957,
+    "Flux_Ratio": 0.008171873097179299,
+    "Time_Delay_s": 2.1282666425268335,
+    "Duration_seconds": 836.794641494751,
+    "SNR": 13.120842439644449
+  },
+  "MCMC_Results": {
+    "Distance_Mpc": 3099.6208584262686,
+    "Chirp_Mass_Msun": 30.09176717240995,
+    "Merger_Time_s": 7.499999651425628,
+    "Phase_pi": 0.7853274961254857,
+    "Flux_Ratio": 0.003785822549719605,
+    "Time_Delay_s": 1.435973757537792,
+    "Duration_seconds": 1228.970923423767,
+    "SNR": 13.121788489200854
+  }
+}

@@ -1,7 +1,0 @@
-Parameter,Unit,True Value,PSO Estimate,PSO Error (%),MCMC Estimate,MCMC Error (%),Refinement Status
-Distance,Mpc,3100.0000,3100.2158,0.01,3099.0860,0.03,"PSO (Refined, conf: 0.00), MCMC (Refined, conf: 0.00)"
-Chirp Mass,M☉,30.0900,30.0958,0.02,30.0873,0.01,
-Merger Time,s,7.5000,7.5000,0.00,7.5000,0.00,
-Phase,rad,0.7854,0.2496,68.22,0.2423,69.16,
-Flux Ratio,,0.3333,0.0055,98.35,0.0086,97.43,
-Time Delay,s,0.9854,3.8970,295.47,2.1009,113.20,

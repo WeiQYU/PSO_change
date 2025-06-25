@@ -1,0 +1,9 @@
+Metric,PSO,MCMC,PSO Advantage
+Execution Time (seconds),1711.38,2988.57,1.75x faster
+Signal-to-Noise Ratio (SNR),26.64,26.65,Lower
+Template Match,0.9999,1.0000,Lower
+Classification,lens_signal,lens_signal,Same
+Lensing Detection,Yes,Yes,Same
+Distance Error (%),0.07,0.08,Lower
+Chirp Mass Error (%),0.02,0.02,Lower
+Merger Time Error (%),0.00,0.00,Higher

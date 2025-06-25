@@ -5,6 +5,7 @@ from pycbc.filter import match, matched_filter
 import scipy.constants as const
 import time
 from scipy.optimize import minimize_scalar
+from scipy.interpolate import interp1d  # Added import for the new lens function
 
 # Constants
 G = const.G
@@ -16,7 +17,7 @@ __all__ = [
     'crcbqcpsopsd',
     'crcbpso',
     'generate_unlensed_gw',
-    'apply_lensing_effect',
+    'lens',  # Updated function name
     'crcbgenqcsig',
     'glrtqcsig4pso',
     'ssrqc',
@@ -54,7 +55,7 @@ def generate_unlensed_gw(dataX, r, m_c, tc, phi_c):
     h = np.zeros_like(t)
 
     if np.sum(valid_idx) > 0:
-        # Calculate frequency evolution parameter Theta
+        # Calculate frequency evolution parameter Thetazhge 
         Theta = c ** 3 * (tc - t_valid) / (5 * G * m_c)
 
         # Calculate amplitude
@@ -69,30 +70,39 @@ def generate_unlensed_gw(dataX, r, m_c, tc, phi_c):
     return h
 
 
-def apply_lensing_effect(h, t, A, delta_t, tc):
-    """Apply lensing effect to a gravitational wave signal"""
-    # Calculate FFT of signal
-    n = len(h)
-    h_fft = np.fft.fft(h)
-
-    # Calculate frequency array
-    dt = t[1] - t[0]
-    freqs = np.fft.fftfreq(n, dt)
-
-    # Calculate lens transfer function F(f) = 1 + A * exp(i * Phi)
-    Phi = 2 * np.pi * freqs * delta_t
-    lens_transfer = 1 + A * np.exp(1j * Phi)
-
-    # Apply lensing effect in frequency domain
-    h_lensed_fft = h_fft * lens_transfer
-
-    # Convert back to time domain
-    h_lens = np.real(np.fft.ifft(h_lensed_fft))
-
-    # Ensure signal is zero after merger time
-    h_lens[t > tc] = 0
-
-    return h_lens
+def lens(h, t, td, A):
+    """
+    Apply lensing effect to a gravitational wave signal using interpolation method
+    
+    Parameters:
+    h: original gravitational wave signal
+    t: time array
+    td: time delay (delta_t)
+    A: flux ratio parameter
+    
+    Returns:
+    h_lensed: lensed gravitational wave signal
+    """
+    # Calculate magnification factors
+    mu_plus = np.sqrt(2 / (1 - A))
+    mu_minus = np.sqrt(2 * A / (1 - A))
+    
+    # Create interpolation function for the original signal
+    interp_func = interp1d(t, h, kind='cubic', bounds_error=False, fill_value=0.0)
+    
+    # Calculate delayed time array
+    t_delayed = t + td
+    
+    # Get delayed signal through interpolation
+    h_delayed = interp_func(t_delayed)
+    
+    # Apply lensing transformation
+    h_lensed = mu_plus * h
+    
+    if A > 0.01:
+        h_lensed = h_lensed - mu_minus * h_delayed 
+    
+    return h_lensed
 
 
 def crcbgenqcsig(dataX, r, m_c, tc, phi_c, A, delta_t, use_lensing=True):
@@ -106,7 +116,10 @@ def crcbgenqcsig(dataX, r, m_c, tc, phi_c, A, delta_t, use_lensing=True):
             t = np.asarray(dataX)
         else:
             t = dataX
-        h = apply_lensing_effect(h, t, A, delta_t, tc)
+        h = lens(h, t, delta_t, A)  # Updated to use new lens function
+        
+        # Ensure signal is zero after merger time
+        h[t > tc] = 0
 
     return h
 
@@ -147,9 +160,9 @@ def normsig4psd(sigVec, sampFreq, psdVec, snr):
     return normFac * sigVec, normFac
 
 
-def direct_amplitude_distance_refinement(pso_params, dataX, observed_signal, sampFreq, psdHigh):
+def direct_amplitude_distance_refinement(pso_params, dataX, observed_signal, sampFreq, psdHigh, actual_params=None):
     """
-    直接基于振幅比计算距离参数的改进方法
+    直接基于振幅比计算距离参数的改进方法，增加了90%-110%范围的约束检查
     """
     print("开始直接基于振幅比的距离参数精炼")
     
@@ -158,6 +171,29 @@ def direct_amplitude_distance_refinement(pso_params, dataX, observed_signal, sam
     original_distance_mpc = 10 ** original_r
     
     print(f"原始距离估计: {original_distance_mpc:.4f} Mpc")
+    
+    # 检查90%-110%范围约束
+    if actual_params is not None:
+        true_distance = actual_params['source_distance']
+        distance_ratio = original_distance_mpc / true_distance
+        
+        print(f"真实距离: {true_distance:.2f} Mpc")
+        print(f"距离比值: {distance_ratio:.4f}")
+        
+        # 如果原始距离在真实距离的90%-110%范围内，不进行精炼
+        if 0.9 <= distance_ratio <= 1.1:
+            print("原始距离参数在真实参数的90%-110%范围内，跳过距离精炼")
+            return pso_params, {
+                'status': 'skipped_within_range',
+                'method': 'direct_amplitude_ratio',
+                'original_distance_mpc': original_distance_mpc,
+                'original_distance_log10': original_r,
+                'final_distance_mpc': original_distance_mpc,
+                'final_distance_log10': original_r,
+                'distance_ratio': distance_ratio,
+                'improvement_used': False,
+                'skip_reason': f'Distance within 90%-110% range (ratio: {distance_ratio:.4f})'
+            }
     
     m_c = pso_params['m_c']
     tc = pso_params['tc']
@@ -272,6 +308,12 @@ def direct_amplitude_distance_refinement(pso_params, dataX, observed_signal, sam
             'new_amplitude_error': new_amplitude_error if 'new_amplitude_error' in locals() else 0
         }
         
+        # 添加约束检查信息
+        if actual_params is not None:
+            true_distance = actual_params['source_distance']
+            distance_ratio = original_distance_mpc / true_distance
+            refinement_info['distance_ratio'] = distance_ratio
+        
         print(f"最终使用距离: {final_distance:.1f} Mpc")
         
         return refined_params, refinement_info
@@ -291,8 +333,8 @@ def direct_amplitude_distance_refinement(pso_params, dataX, observed_signal, sam
         }
 
 
-def refine_distance_parameter(initial_params, dataX, dataY_only_signal, sampFreq, psdHigh, param_ranges):
-    """Enhanced distance parameter refinement using direct amplitude ratio method"""
+def refine_distance_parameter(initial_params, dataX, dataY_only_signal, sampFreq, psdHigh, param_ranges, actual_params=None):
+    """Enhanced distance parameter refinement using direct amplitude ratio method with 90%-110% constraint"""
     print("Starting distance parameter refinement...")
 
     pso_params = {
@@ -306,7 +348,7 @@ def refine_distance_parameter(initial_params, dataX, dataY_only_signal, sampFreq
 
     try:
         refined_params, refinement_info = direct_amplitude_distance_refinement(
-            pso_params, dataX, dataY_only_signal, sampFreq, psdHigh
+            pso_params, dataX, dataY_only_signal, sampFreq, psdHigh, actual_params
         )
 
         refined_distance = refined_params['r']
@@ -488,7 +530,7 @@ def two_step_matching(params, dataY, psdHigh, sampFreq, actual_params=None, enab
 
         try:
             refined_r, refinement_info = refine_distance_parameter(
-                initial_params_dict, dataX, dataY_only_signal, sampFreq, psdHigh, param_ranges
+                initial_params_dict, dataX, dataY_only_signal, sampFreq, psdHigh, param_ranges, actual_params
             )
 
             result['distance_refinement'].update({

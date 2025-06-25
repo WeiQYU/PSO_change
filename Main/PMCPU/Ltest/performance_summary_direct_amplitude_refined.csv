@@ -1,7 +1,0 @@
-Metric,PSO (Direct Amplitude Ratio Distance Refined),MCMC (Direct Amplitude Ratio Distance Refined)
-Execution Time (s),1768.53,4422.56
-Speed Improvement Factor,2.50×,1.0× (baseline)
-Signal-to-Noise Ratio,20.07,20.09
-Template Match,0.8750,0.8751
-Average Parameter Error (%),17.08,17.50
-Direct Amplitude Ratio Distance Refinement Success,Yes,Yes
