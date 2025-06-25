@@ -31,7 +31,7 @@ M_sun = 1.989e30
 pc = 3.086e16
 
 # Create results directory
-results_dir = "GW_Result_circulate1"
+results_dir = "L_GW_Result"
 os.makedirs(results_dir, exist_ok=True)
 print("当前保存目录为：",results_dir)
 # Set plotting parameters
@@ -54,7 +54,7 @@ def load_data():
     print("Loading data...")
 
     TrainingData = scio.loadmat('../generate_data/noise.mat')
-    analysisData = scio.loadmat('../generate_data/data_without_lens.mat')
+    analysisData = scio.loadmat('../generate_data/data.mat')
 
     print("Data loaded successfully")
 

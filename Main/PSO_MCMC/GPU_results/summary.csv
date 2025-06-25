@@ -1,6 +1,0 @@
-Metric,PSO,Bilby MCMC
-Execution Time (s),372.16,2028.87
-Speed Improvement,5.45x faster,baseline
-SNR,34.44,3.45
-Match (Signal Quality),0.9994,0.9997
-Final Match,0.9994,0.9997

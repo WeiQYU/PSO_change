@@ -1,2 +1,0 @@
-Run_Number,Distance_Log10,Distance_Mpc,Distance_Error_Percent,ChirpMass_Log10,ChirpMass_Msun,ChirpMass_Error_Percent,MergerTime_s,MergerTime_Error_Percent,Phase_rad,Phase_pi,Phase_Error_Percent,FluxRatio_A,FluxRatio_Error_Percent,TimeDelay_s,TimeDelay_Error_Percent,SNR,Match,Is_Lensed,Avg_Error_Percent
-1,3.316525,2072.65,33.1404,1.478908,30.1236,0.1118,4.885726,34.8570,2.334685,0.743153,24.6577,0.148021,55.5894,0.995159,0.9904,723.3336,0.874639,True,24.8911

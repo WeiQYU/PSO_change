@@ -31,7 +31,7 @@ M_sun = 1.989e30
 pc = 3.086e16
 
 # Create results directory
-results_dir = "L_Result_circulate1"
+results_dir = "L_GW_Result"
 os.makedirs(results_dir, exist_ok=True)
 
 # Set plotting parameters
