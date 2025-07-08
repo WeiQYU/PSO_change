@@ -1106,30 +1106,26 @@ def create_mcmc_corner_plot_with_true_values(mcmc_results, param_ranges, actual_
                     # Add legend in the top-right corner
                     if i == 0 and j == n_params - 1:
                         from matplotlib.lines import Line2D
-                        
-                        # legend_elements = [
-                        #     Line2D([0], [0], color=true_color, linestyle='--', linewidth=2.5, label='True Value'),
-                        #     Line2D([0], [0], color='blue', linewidth=2, label='Mean'),
-                        #     Line2D([0], [0], color='darkred', linewidth=2.5, label='KDE'),
-                        #     Line2D([0], [0], color=contour_colors[0], linewidth=2, label='68% CI'),
-                        #     Line2D([0], [0], color=contour_colors[1], linewidth=1.5, label='95% CI'),
-                        #     Line2D([0], [0], marker='o', color='w', markerfacecolor=scatter_color, 
-                        #           markersize=8, alpha=0.6, linestyle='None', label='Samples'),
-                        # ]
-                        
-                        # ax.legend(handles=legend_elements, loc='center', fontsize=12, 
-                        #          frameon=True, fancybox=True, shadow=True)
         
         # Add overall title with lensing status
         title_suffix = " (Lensed Signal)" if is_lensed else " (Non-lensed Signal)"
         fig.suptitle('MCMC Posterior Analysis' + title_suffix, 
                     fontsize=20, fontweight='bold', y=0.98)
-        
+
         # Save the plot
         plot_filename = f"gw_analysis_corner_{'lensed' if is_lensed else 'unlensed'}.png"
-        plt.savefig(f"{results_dir}/{plot_filename}", 
-                   bbox_inches='tight', dpi=300, facecolor='white')
+        plt.savefig(f"{results_dir}/{plot_filename}",
+                    bbox_inches='tight', dpi=300, facecolor='white')
+
+        # Save as PDF format
+        plot_filename_pdf = f"gw_analysis_corner_{'lensed' if is_lensed else 'unlensed'}.pdf"
+        plt.savefig(f"{results_dir}/{plot_filename}",
+                    bbox_inches='tight', format='pdf', facecolor='white')
+
         plt.close()
+
+        print(f"Corner plot saved to {results_dir}/{plot_filename}")
+        print(f"Corner plot PDF saved to {results_dir}/{plot_filename}")
         
         print(f"Corner plot saved to {results_dir}/{plot_filename}")
         
@@ -1184,6 +1180,10 @@ def generate_publication_plots(pso_results, mcmc_results, data_dict, comparison,
 
         plt.tight_layout()
         plt.savefig(f"{results_dir}/waveform_reconstruction.png", bbox_inches='tight', dpi=300)
+
+        # Save as PDF format
+        plt.savefig(f"{results_dir}/waveform_reconstruction.pdf", bbox_inches='tight', format='pdf')
+
         plt.close()
 
         print(f"Waveform reconstruction plot saved to {results_dir}/waveform_reconstruction.png")
