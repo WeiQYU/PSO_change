@@ -1,0 +1,3 @@
+Method,Iterations_to_Converge,Runtime_seconds,SNR,Match,Classification
+PSO,2,863.47,13.1216,0.999999,signal
+MCMC,1,1403.25,13.1233,0.999998,signal

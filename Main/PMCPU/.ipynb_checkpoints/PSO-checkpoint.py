@@ -5,7 +5,7 @@ from pycbc.filter import match, matched_filter
 import scipy.constants as const
 import time
 from scipy.optimize import minimize_scalar
-from scipy.interpolate import interp1d
+from scipy.interpolate import interp1d  # Added import for the new lens function
 
 # Constants
 G = const.G
@@ -14,10 +14,10 @@ M_sun = 1.989e30
 pc = 3.086e16
 
 __all__ = [
-    'crcbqcpsopsd_traditional',
-    'crcbpso_traditional',
+    'crcbqcpsopsd',
+    'crcbpso',
     'generate_unlensed_gw',
-    'lens',
+    'lens',  # Updated function name
     'crcbgenqcsig',
     'glrtqcsig4pso',
     'ssrqc',
@@ -55,7 +55,7 @@ def generate_unlensed_gw(dataX, r, m_c, tc, phi_c):
     h = np.zeros_like(t)
 
     if np.sum(valid_idx) > 0:
-        # Calculate frequency evolution parameter
+        # Calculate frequency evolution parameter Thetazhge 
         Theta = c ** 3 * (tc - t_valid) / (5 * G * m_c)
 
         # Calculate amplitude
@@ -71,7 +71,18 @@ def generate_unlensed_gw(dataX, r, m_c, tc, phi_c):
 
 
 def lens(h, t, td, I):
-    """Apply lensing effect to a gravitational wave signal using interpolation method"""
+    """
+    Apply lensing effect to a gravitational wave signal using interpolation method
+    
+    Parameters:
+    h: original gravitational wave signal
+    t: time array
+    td: time delay (delta_t)
+    I: flux ratio parameter
+    
+    Returns:
+    h_lensed: lensed gravitational wave signal
+    """
     # Calculate magnification factors
     mu_plus = np.sqrt(2 / (1 - I))
     mu_minus = np.sqrt(2 * I / (1 - I))
@@ -105,7 +116,7 @@ def crcbgenqcsig(dataX, r, m_c, tc, phi_c, I, delta_t, use_lensing=True):
             t = np.asarray(dataX)
         else:
             t = dataX
-        h = lens(h, t, delta_t, I)
+        h = lens(h, t, delta_t, I)  # Updated to use new lens function
         
         # Ensure signal is zero after merger time
         h[t > tc] = 0
@@ -150,7 +161,9 @@ def normsig4psd(sigVec, sampFreq, psdVec, snr):
 
 
 def direct_amplitude_distance_refinement(pso_params, dataX, observed_signal, sampFreq, psdHigh, actual_params=None):
-    """直接基于振幅比计算距离参数的改进方法"""
+    """
+    直接基于振幅比计算距离参数的改进方法，增加了90%-110%范围的约束检查
+    """
     print("开始直接基于振幅比的距离参数精炼")
     
     # 原始参数
@@ -251,6 +264,7 @@ def direct_amplitude_distance_refinement(pso_params, dataX, observed_signal, sam
         
         # 判断是否接受新的距离参数
         amplitude_improvement_threshold = 0.1
+        match_improvement_threshold = 0.01
         
         if new_distance_mpc < 10 or new_distance_mpc > 50000:
             print(f"新距离超出合理范围")
@@ -320,7 +334,7 @@ def direct_amplitude_distance_refinement(pso_params, dataX, observed_signal, sam
 
 
 def refine_distance_parameter(initial_params, dataX, dataY_only_signal, sampFreq, psdHigh, param_ranges, actual_params=None):
-    """Enhanced distance parameter refinement using direct amplitude ratio method"""
+    """Enhanced distance parameter refinement using direct amplitude ratio method with 90%-110% constraint"""
     print("Starting distance parameter refinement...")
 
     pso_params = {
@@ -607,8 +621,8 @@ def calculate_matched_filter_snr(signal, template, psd, fs):
     return abs(snr).max()
 
 
-def crcbqcpsopsd_traditional(inParams, psoParams, nRuns, use_two_step=True, actual_params=None, enable_distance_refinement=True):
-    """Traditional Particle Swarm Optimization main function"""
+def crcbqcpsopsd(inParams, psoParams, nRuns, use_two_step=True, actual_params=None, enable_distance_refinement=True):
+    """Particle Swarm Optimization main function"""
     # Transfer data to CPU
     inParams['dataX'] = np.asarray(inParams['dataX'])
     inParams['dataY'] = np.asarray(inParams['dataY'])
@@ -653,8 +667,7 @@ def crcbqcpsopsd_traditional(inParams, psoParams, nRuns, use_two_step=True, actu
         'distance_refinement_enabled': enable_distance_refinement
     }
 
-    # Run Traditional PSO multiple times
-    print(f"Running {nRuns} traditional PSO optimizations...")
+    # Run PSO multiple times
     for lpruns in range(nRuns):
         currentPSOParams = psoParams.copy()
         currentPSOParams['run'] = lpruns + 1
@@ -663,9 +676,9 @@ def crcbqcpsopsd_traditional(inParams, psoParams, nRuns, use_two_step=True, actu
         seed_value = int(time.time()) + lpruns * 1000
         np.random.seed(seed_value)
 
-        outStruct[lpruns] = crcbpso_traditional(fHandle, nDim, **currentPSOParams)
+        outStruct[lpruns] = crcbpso(fHandle, nDim, **currentPSOParams)
 
-        print(f"Traditional PSO Run {lpruns + 1} completed with best fitness: {outStruct[lpruns]['bestFitness']}")
+        print(f"Run {lpruns + 1} completed with best fitness: {outStruct[lpruns]['bestFitness']}")
 
     # Process results from all runs
     fitVal = np.zeros(nRuns)
@@ -817,21 +830,21 @@ def crcbqcpsopsd_traditional(inParams, psoParams, nRuns, use_two_step=True, actu
     return outResults, outStruct
 
 
-def crcbpso_traditional(fitfuncHandle, nDim, **kwargs):
-    """Traditional PSO core algorithm implementation with only ring topology"""
-    # Traditional PSO parameters (simplified)
+def crcbpso(fitfuncHandle, nDim, **kwargs):
+    """PSO core algorithm implementation"""
+    # Default PSO parameters
     psoParams = {
-        'popsize': 40,
-        'maxSteps': 1000,
+        'popsize': 40,  # Reduced population size
+        'maxSteps': 1000,  # Reduced iterations
         'c1': 2.0,
         'c2': 2.0,
         'max_velocity': 0.5,
         'w_start': 0.9,
         'w_end': 0.4,
         'run': 1,
-        'nbrhdSz': 4,  # Ring topology size
+        'nbrhdSz': 4,
         'init_strategy': 'uniform',
-        'disable_early_stop': True  # Traditional PSO runs to completion
+        'disable_early_stop': False  # Enable early stopping
     }
 
     # Update parameters
@@ -845,10 +858,13 @@ def crcbpso_traditional(fitfuncHandle, nDim, **kwargs):
         'fitnessHistory': []
     }
 
-    # Initialize particles uniformly
-    particles = np.random.rand(psoParams['popsize'], nDim)
+    # Initialize particles
+    if psoParams['init_strategy'] == 'uniform':
+        particles = np.random.rand(psoParams['popsize'], nDim)
+    else:
+        particles = np.random.rand(psoParams['popsize'], nDim)
 
-    # Initialize velocities with small random values
+    # Initialize velocities
     velocities = np.random.uniform(-0.05, 0.05, (psoParams['popsize'], nDim))
 
     # Evaluate initial fitness
@@ -870,15 +886,21 @@ def crcbpso_traditional(fitfuncHandle, nDim, **kwargs):
 
     total_evals = psoParams['popsize']
 
+    # Early stopping setup
+    no_improvement_count = 0
+    prev_best_fitness = float(gbest_fitness)
+    max_no_improvement = 500  # Early stopping after 50 iterations without improvement
+    min_fitness_improvement = 1e-8
+
     # Create progress bar
-    with tqdm(range(psoParams['maxSteps']), desc=f'Traditional PSO Run {psoParams["run"]}', position=0) as pbar:
+    with tqdm(range(psoParams['maxSteps']), desc=f'Run {psoParams["run"]}', position=0) as pbar:
         for step in pbar:
-            # Update inertia weight linearly
+            # Update inertia weight
             w = psoParams['w_start'] - (psoParams['w_start'] - psoParams['w_end']) * step / psoParams['maxSteps']
 
             # Update each particle
             for i in range(psoParams['popsize']):
-                # Ring topology: find local best from neighborhood
+                # Get local best (ring topology)
                 neighbors = []
                 for j in range(psoParams['nbrhdSz']):
                     idx = (i + j) % psoParams['popsize']
@@ -893,19 +915,19 @@ def crcbpso_traditional(fitfuncHandle, nDim, **kwargs):
                 r1 = np.random.rand(nDim)
                 r2 = np.random.rand(nDim)
 
-                # Traditional PSO velocity update equation
+                # Velocity update
                 velocities[i] = (w * velocities[i] +
                                  psoParams['c1'] * r1 * (pbest[i] - particles[i]) +
                                  psoParams['c2'] * r2 * (lbest - particles[i]))
 
-                # Velocity clamping
+                # Velocity limit
                 max_vel = psoParams['max_velocity']
                 velocities[i] = np.clip(velocities[i], -max_vel, max_vel)
 
-                # Position update
+                # Update position
                 particles[i] += velocities[i]
 
-                # Boundary handling with reflection
+                # Handle boundary constraints
                 out_low = particles[i] < 0
                 out_high = particles[i] > 1
 
@@ -932,9 +954,27 @@ def crcbpso_traditional(fitfuncHandle, nDim, **kwargs):
                 gbest = pbest[current_best_idx].copy()
                 gbest_fitness = pbest_fitness[current_best_idx].copy()
                 pbar.set_postfix({'fitness': float(gbest_fitness)})
+                no_improvement_count = 0
+                prev_best_fitness = float(gbest_fitness)
 
             # Record fitness
             returnData['fitnessHistory'].append(float(gbest_fitness))
+
+            # Early stopping logic
+            if not psoParams['disable_early_stop']:
+                current_best_fitness = float(gbest_fitness)
+                fitness_improvement = abs(current_best_fitness - prev_best_fitness)
+
+                if fitness_improvement < min_fitness_improvement:
+                    no_improvement_count += 1
+                else:
+                    no_improvement_count = 0
+                    prev_best_fitness = current_best_fitness
+
+                # Early stopping
+                if no_improvement_count >= max_no_improvement:
+                    print(f"Early stopping at iteration {step + 1}")
+                    break
 
     # Update return data
     returnData.update({
